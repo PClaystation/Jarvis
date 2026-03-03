@@ -16,6 +16,8 @@ Phone-driven remote command system:
 - Agent WebSocket auth handshake + heartbeat
 - Presence tracking (`online`/`offline` + `last_seen`)
 - Request/response correlation with command timeout
+- WebSocket auth timeout + ping keepalive + max-message-size guard
+- Router backpressure + per-device command serialization
 - SQLite `devices` + `command_logs`
 - Go agent with startup registration attempt (Windows task scheduler)
 - Allowlisted agent actions:
@@ -62,7 +64,12 @@ Notes:
    - `PHONE_API_TOKEN`
    - `AGENT_BOOTSTRAP_TOKEN`
    - `PUBLIC_WS_URL` (use `wss://...` behind TLS)
-4. Install and run:
+4. Optional hardening knobs:
+   - `MAX_PENDING_COMMANDS`
+   - `WS_AUTH_TIMEOUT_MS`
+   - `WS_PING_INTERVAL_MS`
+   - `WS_MAX_MESSAGE_BYTES`
+5. Install and run:
 
 ```bash
 cd server
@@ -95,7 +102,7 @@ What first run does:
 
 - enrolls via `/api/enroll`
 - stores long-lived device token in user config
-- attempts startup registration (Windows Task Scheduler)
+- attempts startup registration (Task Scheduler, then HKCU Run-key fallback)
 - starts outbound WebSocket session
 
 Default config path on Windows:

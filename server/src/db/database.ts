@@ -37,6 +37,7 @@ export class Database {
 
     this.db = new BetterSqlite3(sqlitePath);
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("busy_timeout = 5000");
     this.init();
   }
 
@@ -286,5 +287,29 @@ export class Database {
         error_code: input.errorCode ?? null,
         completed_at: completedAt,
       });
+  }
+
+  public healthSnapshot(): {
+    deviceCount: number;
+    onlineDeviceCount: number;
+    commandLogCount: number;
+  } {
+    const deviceCountRow = this.db.prepare("SELECT COUNT(1) AS count FROM devices").get() as
+      | { count: number }
+      | undefined;
+
+    const onlineCountRow = this.db
+      .prepare("SELECT COUNT(1) AS count FROM devices WHERE status = 'online'")
+      .get() as { count: number } | undefined;
+
+    const commandLogCountRow = this.db.prepare("SELECT COUNT(1) AS count FROM command_logs").get() as
+      | { count: number }
+      | undefined;
+
+    return {
+      deviceCount: deviceCountRow?.count ?? 0,
+      onlineDeviceCount: onlineCountRow?.count ?? 0,
+      commandLogCount: commandLogCountRow?.count ?? 0,
+    };
   }
 }

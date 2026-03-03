@@ -28,14 +28,22 @@ func Capabilities() []string {
 	}
 }
 
-func Execute(deviceID string, version string, command protocol.CommandEnvelope) protocol.ResultMessage {
-	result := protocol.ResultMessage{
+func Execute(deviceID string, version string, command protocol.CommandEnvelope) (result protocol.ResultMessage) {
+	result = protocol.ResultMessage{
 		Kind:       "result",
 		RequestID:  command.RequestID,
 		DeviceID:   deviceID,
 		CompletedAt: time.Now().UTC().Format(time.RFC3339),
 		Version:    version,
 	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result.OK = false
+			result.ErrorCode = "AGENT_PANIC"
+			result.Message = "command handler panic recovered"
+		}
+	}()
 
 	handleErr := func(err error, code string) protocol.ResultMessage {
 		result.OK = false

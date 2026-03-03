@@ -1,6 +1,9 @@
 export interface SocketLike {
   send(data: string): void;
+  ping?(data?: Buffer | string, cb?: (error?: Error) => void): void;
   close(code?: number, data?: Buffer | string): void;
+  readyState?: number;
+  OPEN?: number;
 }
 
 export interface ConnectedDevice {
@@ -62,6 +65,10 @@ export class DeviceRegistry {
 
   public listOnlineDeviceIds(): string[] {
     return [...this.devices.keys()];
+  }
+
+  public countOnline(): number {
+    return this.devices.size;
   }
 
   public pruneExpired(ttlMs: number): string[] {

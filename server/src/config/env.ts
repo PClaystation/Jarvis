@@ -21,7 +21,11 @@ export interface AppConfig {
   agentBootstrapToken: string;
   sqlitePath: string;
   commandTimeoutMs: number;
+  maxPendingCommands: number;
   heartbeatTtlMs: number;
+  wsAuthTimeoutMs: number;
+  wsPingIntervalMs: number;
+  wsMaxMessageBytes: number;
   publicWsUrl: string;
 }
 
@@ -32,7 +36,11 @@ export function loadConfig(): AppConfig {
   const agentBootstrapToken = process.env.AGENT_BOOTSTRAP_TOKEN ?? "change-me-bootstrap-token";
   const sqlitePath = process.env.SQLITE_PATH ?? path.join(process.cwd(), "data", "jarvis.db");
   const commandTimeoutMs = readInt("COMMAND_TIMEOUT_MS", 5000);
+  const maxPendingCommands = readInt("MAX_PENDING_COMMANDS", 1000);
   const heartbeatTtlMs = readInt("HEARTBEAT_TTL_MS", 90000);
+  const wsAuthTimeoutMs = readInt("WS_AUTH_TIMEOUT_MS", 10000);
+  const wsPingIntervalMs = readInt("WS_PING_INTERVAL_MS", 30000);
+  const wsMaxMessageBytes = readInt("WS_MAX_MESSAGE_BYTES", 65536);
   const publicWsUrl = process.env.PUBLIC_WS_URL ?? `ws://localhost:${port}/ws/agent`;
 
   return {
@@ -42,7 +50,11 @@ export function loadConfig(): AppConfig {
     agentBootstrapToken,
     sqlitePath,
     commandTimeoutMs,
+    maxPendingCommands,
     heartbeatTtlMs,
+    wsAuthTimeoutMs,
+    wsPingIntervalMs,
+    wsMaxMessageBytes,
     publicWsUrl,
   };
 }

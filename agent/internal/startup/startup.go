@@ -16,7 +16,6 @@ func EnsureStartupRegistration(executablePath string) error {
 	}
 
 	taskCommand := fmt.Sprintf("\"%s\"", executablePath)
-
 	cmd := exec.Command(
 		"schtasks",
 		"/Create",
@@ -31,8 +30,31 @@ func EnsureStartupRegistration(executablePath string) error {
 		"/F",
 	)
 
+	if _, err := cmd.CombinedOutput(); err == nil {
+		return nil
+	}
+
+	// Fallback that works as standard user when Task Scheduler creation is blocked.
+	return ensureRunKey(executablePath)
+}
+
+func ensureRunKey(executablePath string) error {
+	runValue := fmt.Sprintf("\"%s\"", executablePath)
+	cmd := exec.Command(
+		"reg",
+		"add",
+		`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+		"/v",
+		"JarvisAgent",
+		"/t",
+		"REG_SZ",
+		"/d",
+		runValue,
+		"/f",
+	)
+
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("register startup task: %w: %s", err, string(output))
+		return fmt.Errorf("register startup run key: %w: %s", err, string(output))
 	}
 
 	return nil

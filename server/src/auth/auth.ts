@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 export function extractBearerToken(authorizationHeader?: string | string[]): string | null {
   if (!authorizationHeader) {
     return null;
@@ -16,14 +18,12 @@ export function extractBearerToken(authorizationHeader?: string | string[]): str
 }
 
 export function constantTimeEqual(left: string, right: string): boolean {
-  if (left.length !== right.length) {
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+
+  if (leftBuffer.length !== rightBuffer.length) {
     return false;
   }
 
-  let mismatch = 0;
-  for (let i = 0; i < left.length; i += 1) {
-    mismatch |= left.charCodeAt(i) ^ right.charCodeAt(i);
-  }
-
-  return mismatch === 0;
+  return timingSafeEqual(leftBuffer, rightBuffer);
 }

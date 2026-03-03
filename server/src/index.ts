@@ -7,11 +7,28 @@ import { registerRealtime } from "./realtime/realtimeServer";
 import { CommandRouter } from "./router/commandRouter";
 import { log } from "./utils/logger";
 
+function registerProcessGuards(): void {
+  process.on("unhandledRejection", (reason) => {
+    log("error", "Unhandled rejection", {
+      reason: reason instanceof Error ? reason.message : String(reason),
+    });
+  });
+
+  process.on("uncaughtException", (error) => {
+    log("error", "Uncaught exception", {
+      error: error.message,
+      stack: error.stack ?? null,
+    });
+  });
+}
+
 async function main(): Promise<void> {
+  registerProcessGuards();
+
   const config = loadConfig();
   const db = new Database(config.sqlitePath);
   const registry = new DeviceRegistry();
-  const router = new CommandRouter(registry, config.commandTimeoutMs);
+  const router = new CommandRouter(registry, config.commandTimeoutMs, config.maxPendingCommands);
 
   const server = fastify({
     logger: false,
@@ -42,16 +59,27 @@ async function main(): Promise<void> {
     db,
     registry,
     router,
+    wsAuthTimeoutMs: config.wsAuthTimeoutMs,
+    wsPingIntervalMs: config.wsPingIntervalMs,
+    wsMaxMessageBytes: config.wsMaxMessageBytes,
   });
 
   const heartbeatSweepTimer = setInterval(() => {
-    const timedOutDevices = registry.pruneExpired(config.heartbeatTtlMs);
-    for (const deviceId of timedOutDevices) {
-      db.markDeviceOffline(deviceId);
-      router.clearDevicePending(deviceId);
-      log("warn", "Agent heartbeat expired", { device_id: deviceId });
+    try {
+      const timedOutDevices = registry.pruneExpired(config.heartbeatTtlMs);
+      for (const deviceId of timedOutDevices) {
+        db.markDeviceOffline(deviceId);
+        router.clearDevicePending(deviceId);
+        log("warn", "Agent heartbeat expired", { device_id: deviceId });
+      }
+    } catch (error) {
+      log("error", "Heartbeat sweep failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }, 30_000);
+
+  heartbeatSweepTimer.unref?.();
 
   try {
     await server.listen({ host: config.host, port: config.port });
@@ -64,17 +92,30 @@ async function main(): Promise<void> {
     host: config.host,
     port: config.port,
     sqlite_path: config.sqlitePath,
+    max_pending_commands: config.maxPendingCommands,
   });
 
   const shutdown = async (): Promise<void> => {
     clearInterval(heartbeatSweepTimer);
     log("info", "Shutting down server");
+
+    try {
+      router.clearAllPending("server shutdown");
+    } catch {
+      // ignore pending cleanup errors during shutdown
+    }
+
     await server.close();
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => {
+    void shutdown();
+  });
+
+  process.on("SIGTERM", () => {
+    void shutdown();
+  });
 }
 
 main().catch((error) => {

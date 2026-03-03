@@ -1,6 +1,7 @@
 import type { ParseError, ParsedExternalCommand, TypedCommand } from "../types/protocol";
 
 const OPEN_APP_ALLOWLIST = new Set(["spotify", "discord", "chrome"]);
+const MAX_NOTIFY_TEXT_LENGTH = 180;
 
 function normalized(text: string): string {
   return text.toLowerCase().trim().replace(/\s+/g, " ");
@@ -67,6 +68,13 @@ function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
       };
     }
 
+    if (text.length > MAX_NOTIFY_TEXT_LENGTH) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `notify text too long (max ${MAX_NOTIFY_TEXT_LENGTH})`,
+      };
+    }
+
     return {
       type: "NOTIFY",
       args: { text },
@@ -92,7 +100,7 @@ export function parseExternalCommand(text: string): ParsedExternalCommand | Pars
   const parts = normalizedText.split(" ");
   const target = parts[0] ?? "";
 
-  if (!/^(all|m[a-z0-9_-]+)$/.test(target)) {
+  if (!/^(all|m[a-z0-9_-]{1,31})$/.test(target)) {
     return {
       code: "UNKNOWN_TARGET",
       message: `Unknown target: ${target}`,

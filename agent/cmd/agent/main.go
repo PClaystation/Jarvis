@@ -236,10 +236,11 @@ func runLoop(ctx context.Context, cfg *config.Config) {
 
 		log.Printf("session ended: %v", err)
 
+		jitter := time.Duration(time.Now().UnixNano()%500) * time.Millisecond
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
+		case <-time.After(backoff + jitter):
 		}
 
 		if backoff < 30*time.Second {
@@ -258,6 +259,7 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("connect websocket: %w", err)
 	}
 	defer conn.Close()
+	conn.SetReadLimit(65_536)
 
 	hostname, _ := os.Hostname()
 	username := strings.TrimSpace(os.Getenv("USERNAME"))
@@ -275,6 +277,7 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 		Capabilities: commands.Capabilities(),
 	}
 
+	conn.SetWriteDeadline(time.Now().Add(8 * time.Second))
 	if err := conn.WriteJSON(hello); err != nil {
 		return fmt.Errorf("send hello: %w", err)
 	}
@@ -293,12 +296,18 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 	defer heartbeatTicker.Stop()
 
 	errorCh := make(chan error, 2)
+	sendError := func(err error) {
+		select {
+		case errorCh <- err:
+		default:
+		}
+	}
 
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				errorCh <- nil
+				sendError(nil)
 				return
 			case <-heartbeatTicker.C:
 				hb := protocol.HeartbeatMessage{
@@ -308,7 +317,7 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 				}
 
 				if err := sendJSON(hb); err != nil {
-					errorCh <- fmt.Errorf("send heartbeat: %w", err)
+					sendError(fmt.Errorf("send heartbeat: %w", err))
 					return
 				}
 			}
@@ -320,7 +329,7 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 			conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 			_, payload, err := conn.ReadMessage()
 			if err != nil {
-				errorCh <- fmt.Errorf("read message: %w", err)
+				sendError(fmt.Errorf("read message: %w", err))
 				return
 			}
 
@@ -356,7 +365,7 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 
 				result := commands.Execute(cfg.DeviceID, cfg.Version, command)
 				if err := sendJSON(result); err != nil {
-					errorCh <- fmt.Errorf("send result: %w", err)
+					sendError(fmt.Errorf("send result: %w", err))
 					return
 				}
 			case "hello_ack", "heartbeat_ack":
