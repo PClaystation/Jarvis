@@ -3,13 +3,18 @@ export type CommandType =
   | "OPEN_APP"
   | "MEDIA_PLAY"
   | "MEDIA_PAUSE"
+  | "MEDIA_PLAY_PAUSE"
   | "MEDIA_NEXT"
   | "MEDIA_PREVIOUS"
   | "VOLUME_UP"
   | "VOLUME_DOWN"
   | "MUTE"
   | "LOCK_PC"
-  | "NOTIFY";
+  | "NOTIFY"
+  | "SYSTEM_SLEEP"
+  | "SYSTEM_SHUTDOWN"
+  | "SYSTEM_RESTART"
+  | "AGENT_UPDATE";
 
 export interface TypedCommand {
   type: CommandType;

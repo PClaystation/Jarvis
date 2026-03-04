@@ -42,6 +42,24 @@ function readCsv(name: string, fallback: string): string[] {
     .filter((item) => item.length > 0);
 }
 
+function readBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+
+  const normalized = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  throw new Error(`Invalid boolean for ${name}`);
+}
+
 function isRealToken(value: string | undefined, placeholder: string): value is string {
   const normalized = value?.trim() ?? "";
   return normalized.length > 0 && normalized !== placeholder;
@@ -167,6 +185,10 @@ export interface AppConfig {
   wsAuthTimeoutMs: number;
   wsPingIntervalMs: number;
   wsMaxMessageBytes: number;
+  updateCommandTimeoutMs: number;
+  updateMetadataTimeoutMs: number;
+  updateMaxPackageBytes: number;
+  enforceHttpsUpdateUrl: boolean;
   corsAllowedOrigins: string[];
   publicWsUrl: string;
   pwaPublicUrl: string;
@@ -183,6 +205,10 @@ export function loadConfig(): AppConfig {
   const wsAuthTimeoutMs = readInt("WS_AUTH_TIMEOUT_MS", 10000);
   const wsPingIntervalMs = readInt("WS_PING_INTERVAL_MS", 30000);
   const wsMaxMessageBytes = readInt("WS_MAX_MESSAGE_BYTES", 65536);
+  const updateCommandTimeoutMs = readInt("UPDATE_COMMAND_TIMEOUT_MS", 300000);
+  const updateMetadataTimeoutMs = readInt("UPDATE_METADATA_TIMEOUT_MS", 120000);
+  const updateMaxPackageBytes = readInt("UPDATE_MAX_PACKAGE_BYTES", 314572800);
+  const enforceHttpsUpdateUrl = readBool("ENFORCE_HTTPS_UPDATE_URL", true);
   const corsAllowedOrigins = readCsv("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ALLOWED_ORIGINS);
   const publicWsUrl = process.env.PUBLIC_WS_URL ?? `ws://localhost:${port}/ws/agent`;
   const pwaPublicUrl = process.env.PWA_PUBLIC_URL ?? DEFAULT_PWA_PUBLIC_URL;
@@ -202,6 +228,10 @@ export function loadConfig(): AppConfig {
     wsAuthTimeoutMs,
     wsPingIntervalMs,
     wsMaxMessageBytes,
+    updateCommandTimeoutMs,
+    updateMetadataTimeoutMs,
+    updateMaxPackageBytes,
+    enforceHttpsUpdateUrl,
     corsAllowedOrigins,
     publicWsUrl,
     pwaPublicUrl,

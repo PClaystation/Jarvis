@@ -13,10 +13,21 @@ const sendBtn = document.getElementById("sendBtn");
 const commandText = document.getElementById("commandText");
 const resultBox = document.getElementById("resultBox");
 const speechInfo = document.getElementById("speechInfo");
+const updateTargetInput = document.getElementById("updateTargetInput");
+const updateVersionInput = document.getElementById("updateVersionInput");
+const updateUrlInput = document.getElementById("updateUrlInput");
+const updateShaInput = document.getElementById("updateShaInput");
+const updateSizeInput = document.getElementById("updateSizeInput");
+const pushUpdateBtn = document.getElementById("pushUpdateBtn");
 
 const TOKEN_KEY = "jarvis_phone_api_token";
 const TARGET_KEY = "jarvis_last_target";
 const API_BASE_KEY = "jarvis_api_base_url";
+const UPDATE_TARGET_KEY = "jarvis_update_target";
+const UPDATE_VERSION_KEY = "jarvis_update_version";
+const UPDATE_URL_KEY = "jarvis_update_url";
+const UPDATE_SHA_KEY = "jarvis_update_sha";
+const UPDATE_SIZE_KEY = "jarvis_update_size";
 
 function nowRequestId() {
   return "web-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
@@ -159,6 +170,10 @@ function composeCommand() {
     return arg ? `${target} notify ${arg}` : `${target} notify hello`;
   }
 
+  if (arg && (action === "volume up" || action === "volume down" || action === "next" || action === "previous")) {
+    return `${target} ${action} ${arg}`;
+  }
+
   return `${target} ${action}`;
 }
 
@@ -256,6 +271,53 @@ async function sendCommand() {
   setResult(result);
 }
 
+async function pushUpdate() {
+  if (!updateTargetInput || !updateVersionInput || !updateUrlInput || !updateShaInput || !updateSizeInput) {
+    throw new Error("Update controls are not available in this app build.");
+  }
+
+  const target = (updateTargetInput.value || "").trim().toLowerCase();
+  const version = (updateVersionInput.value || "").trim();
+  const packageUrl = (updateUrlInput.value || "").trim();
+  const sha256 = (updateShaInput.value || "").trim().toLowerCase();
+  const sizeRaw = (updateSizeInput.value || "").trim();
+
+  if (!target) {
+    throw new Error("Update target is required.");
+  }
+
+  if (!version) {
+    throw new Error("Update version is required.");
+  }
+
+  if (!packageUrl) {
+    throw new Error("Update package URL is required.");
+  }
+
+  let sizeBytes;
+  if (sizeRaw) {
+    const parsedSize = Number.parseInt(sizeRaw, 10);
+    if (!Number.isFinite(parsedSize) || parsedSize <= 0) {
+      throw new Error("Update size must be a positive integer.");
+    }
+
+    sizeBytes = parsedSize;
+  }
+
+  const payload = {
+    request_id: nowRequestId(),
+    source: "pwa",
+    target,
+    version,
+    package_url: packageUrl,
+    ...(sha256 ? { sha256 } : {}),
+    ...(sizeBytes ? { size_bytes: sizeBytes } : {}),
+  };
+
+  const result = await apiRequest("/api/update", payload);
+  setResult(result);
+}
+
 function setupSpeech() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -298,6 +360,14 @@ function init() {
     targetInput.value = lastTarget;
   }
 
+  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput) {
+    updateTargetInput.value = localStorage.getItem(UPDATE_TARGET_KEY) || targetInput.value || "m1";
+    updateVersionInput.value = localStorage.getItem(UPDATE_VERSION_KEY) || "";
+    updateUrlInput.value = localStorage.getItem(UPDATE_URL_KEY) || "";
+    updateShaInput.value = localStorage.getItem(UPDATE_SHA_KEY) || "";
+    updateSizeInput.value = localStorage.getItem(UPDATE_SIZE_KEY) || "";
+  }
+
   const initialCommand = composeCommand();
   if (initialCommand) {
     commandText.value = initialCommand;
@@ -309,6 +379,9 @@ function init() {
 
   targetInput.addEventListener("change", () => {
     localStorage.setItem(TARGET_KEY, targetInput.value.trim().toLowerCase());
+    if (updateTargetInput && !localStorage.getItem(UPDATE_TARGET_KEY) && updateTargetInput.value.trim() === "") {
+      updateTargetInput.value = targetInput.value.trim().toLowerCase();
+    }
     commandText.value = composeCommand();
   });
 
@@ -335,6 +408,24 @@ function init() {
     setResult("Connection settings saved on this device.");
   });
 
+  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput) {
+    updateTargetInput.addEventListener("change", () => {
+      localStorage.setItem(UPDATE_TARGET_KEY, updateTargetInput.value.trim().toLowerCase());
+    });
+    updateVersionInput.addEventListener("change", () => {
+      localStorage.setItem(UPDATE_VERSION_KEY, updateVersionInput.value.trim());
+    });
+    updateUrlInput.addEventListener("change", () => {
+      localStorage.setItem(UPDATE_URL_KEY, updateUrlInput.value.trim());
+    });
+    updateShaInput.addEventListener("change", () => {
+      localStorage.setItem(UPDATE_SHA_KEY, updateShaInput.value.trim().toLowerCase());
+    });
+    updateSizeInput.addEventListener("change", () => {
+      localStorage.setItem(UPDATE_SIZE_KEY, updateSizeInput.value.trim());
+    });
+  }
+
   loadDevicesBtn.addEventListener("click", async () => {
     try {
       await loadDevices();
@@ -356,6 +447,21 @@ function init() {
       sendBtn.textContent = "Send";
     }
   });
+
+  if (pushUpdateBtn) {
+    pushUpdateBtn.addEventListener("click", async () => {
+      try {
+        pushUpdateBtn.disabled = true;
+        pushUpdateBtn.textContent = "Pushing...";
+        await pushUpdate();
+      } catch (error) {
+        setResult(error instanceof Error ? error.message : String(error));
+      } finally {
+        pushUpdateBtn.disabled = false;
+        pushUpdateBtn.textContent = "Push Update";
+      }
+    });
+  }
 
   setupSpeech();
 

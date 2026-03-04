@@ -65,6 +65,7 @@ export class CommandRouter {
     requestId: string;
     deviceId: string;
     command: TypedCommand;
+    timeoutMs?: number;
   }): Promise<CommandDispatchResult> {
     return this.enqueueDevice(input.deviceId, () => this.dispatchToDeviceNow(input));
   }
@@ -73,6 +74,7 @@ export class CommandRouter {
     requestId: string;
     deviceIds: string[];
     command: TypedCommand;
+    timeoutMs?: number;
   }): Promise<CommandDispatchResult[]> {
     return Promise.all(
       input.deviceIds.map((deviceId) =>
@@ -80,6 +82,7 @@ export class CommandRouter {
           requestId: input.requestId,
           deviceId,
           command: input.command,
+          timeoutMs: input.timeoutMs,
         }).catch((error) => {
           const routed = asDispatchError(error);
           return {
@@ -143,6 +146,7 @@ export class CommandRouter {
     requestId: string;
     deviceId: string;
     command: TypedCommand;
+    timeoutMs?: number;
   }): Promise<CommandDispatchResult> {
     if (this.pending.size >= this.maxPendingCommands) {
       throw new DispatchError("ROUTER_OVERLOADED", "Server is busy, try again", true);
@@ -171,11 +175,12 @@ export class CommandRouter {
       issued_at: new Date().toISOString(),
     };
 
+    const timeoutMs = this.resolveTimeoutMs(input.timeoutMs);
     const promise = new Promise<CommandDispatchResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(key);
         reject(new DispatchError("TIMEOUT", `${input.deviceId} did not respond in time`, true));
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       this.pending.set(key, { resolve, reject, timer });
     });
@@ -219,5 +224,16 @@ export class CommandRouter {
 
   private pendingKey(deviceId: string, requestId: string): string {
     return `${deviceId}:${requestId}`;
+  }
+
+  private resolveTimeoutMs(overrideMs?: number): number {
+    if (typeof overrideMs !== "number" || !Number.isFinite(overrideMs) || overrideMs <= 0) {
+      return this.timeoutMs;
+    }
+
+    const bounded = Math.floor(overrideMs);
+    const min = 1_000;
+    const max = 15 * 60 * 1_000;
+    return Math.max(min, Math.min(max, bounded));
   }
 }

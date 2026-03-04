@@ -43,4 +43,8 @@ Create one home-screen button shortcut and keep phrases explicit, for example:
 
 - `m1 open spotify`
 - `m1 pause`
+- `m1 open vscode`
+- `m2 volume down 4`
+- `m1 play pause`
+- `m1 shutdown`
 - `m3 lock`

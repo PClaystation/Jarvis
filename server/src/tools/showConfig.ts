@@ -35,6 +35,11 @@ const output = {
   cors_allowed_origins: config.corsAllowedOrigins,
   public_ws_url: config.publicWsUrl,
   pwa_public_url: config.pwaPublicUrl,
+  command_timeout_ms: config.commandTimeoutMs,
+  update_command_timeout_ms: config.updateCommandTimeoutMs,
+  update_metadata_timeout_ms: config.updateMetadataTimeoutMs,
+  update_max_package_bytes: config.updateMaxPackageBytes,
+  enforce_https_update_url: config.enforceHttpsUpdateUrl,
   pwa_url: publicOrigin ? `${publicOrigin}/app` : null,
   pwa_pairing_url: publicOrigin
     ? `${publicOrigin}/app#api=${encodeURIComponent(publicOrigin)}&token=${encodeURIComponent(config.phoneApiToken)}`

@@ -3,6 +3,7 @@ package commands
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -14,9 +15,20 @@ import (
 const commandTimeout = 8 * time.Second
 
 var openAppTargets = map[string]string{
-	"spotify": "spotify:",
-	"discord": "discord://",
-	"chrome":  "chrome",
+	"spotify":    "spotify:",
+	"discord":    "discord://",
+	"chrome":     "chrome",
+	"steam":      "steam://open/main",
+	"explorer":   "explorer",
+	"vscode":     "code",
+	"edge":       "msedge",
+	"firefox":    "firefox",
+	"notepad":    "notepad",
+	"calculator": "calc",
+	"settings":   "ms-settings:",
+	"slack":      "slack:",
+	"teams":      "msteams:",
+	"taskmanager": "taskmgr",
 }
 
 func Capabilities() []string {
@@ -25,6 +37,8 @@ func Capabilities() []string {
 		"notifications",
 		"locking",
 		"open_app",
+		"power_control",
+		"updater",
 	}
 }
 
@@ -86,37 +100,81 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.OK = true
 		result.Message = "Pause command sent"
 		return result
-	case "MEDIA_NEXT":
-		if err := sendMediaKey("MEDIA_NEXT_TRACK"); err != nil {
+	case "MEDIA_PLAY_PAUSE":
+		if err := sendMediaKey("MEDIA_PLAY_PAUSE"); err != nil {
 			return handleErr(err, "MEDIA_FAILED")
 		}
 
 		result.OK = true
-		result.Message = "Next track command sent"
+		result.Message = "Play/pause toggled"
+		return result
+	case "MEDIA_NEXT":
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("MEDIA_NEXT_TRACK", steps); err != nil {
+			return handleErr(err, "MEDIA_FAILED")
+		}
+
+		result.OK = true
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Next track command sent x%d", steps)
+		} else {
+			result.Message = "Next track command sent"
+		}
 		return result
 	case "MEDIA_PREVIOUS":
-		if err := sendMediaKey("MEDIA_PREV_TRACK"); err != nil {
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("MEDIA_PREV_TRACK", steps); err != nil {
 			return handleErr(err, "MEDIA_FAILED")
 		}
 
 		result.OK = true
-		result.Message = "Previous track command sent"
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Previous track command sent x%d", steps)
+		} else {
+			result.Message = "Previous track command sent"
+		}
 		return result
 	case "VOLUME_UP":
-		if err := sendMediaKey("VOLUME_UP"); err != nil {
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("VOLUME_UP", steps); err != nil {
 			return handleErr(err, "VOLUME_FAILED")
 		}
 
 		result.OK = true
-		result.Message = "Volume up command sent"
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Volume up command sent x%d", steps)
+		} else {
+			result.Message = "Volume up command sent"
+		}
 		return result
 	case "VOLUME_DOWN":
-		if err := sendMediaKey("VOLUME_DOWN"); err != nil {
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("VOLUME_DOWN", steps); err != nil {
 			return handleErr(err, "VOLUME_FAILED")
 		}
 
 		result.OK = true
-		result.Message = "Volume down command sent"
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Volume down command sent x%d", steps)
+		} else {
+			result.Message = "Volume down command sent"
+		}
 		return result
 	case "MUTE":
 		if err := sendMediaKey("VOLUME_MUTE"); err != nil {
@@ -147,6 +205,30 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.OK = true
 		result.Message = "Notification shown"
 		return result
+	case "SYSTEM_SLEEP":
+		if err := sleepPC(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Sleep command scheduled"
+		return result
+	case "SYSTEM_SHUTDOWN":
+		if err := shutdownPC(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Shutdown scheduled (5s)"
+		return result
+	case "SYSTEM_RESTART":
+		if err := restartPC(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Restart scheduled (5s)"
+		return result
 	default:
 		return handleErr(fmt.Errorf("unknown command type: %s", command.Type), "UNKNOWN_TYPE")
 	}
@@ -171,6 +253,36 @@ func readStringArg(args map[string]any, key string) (string, error) {
 	return asString, nil
 }
 
+func readOptionalIntArg(args map[string]any, key string, fallback int, min int, max int) (int, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+
+	var asInt int
+	switch typed := value.(type) {
+	case float64:
+		if math.Trunc(typed) != typed {
+			return 0, fmt.Errorf("arg must be integer: %s", key)
+		}
+		asInt = int(typed)
+	case int:
+		asInt = typed
+	case int32:
+		asInt = int(typed)
+	case int64:
+		asInt = int(typed)
+	default:
+		return 0, fmt.Errorf("arg must be number: %s", key)
+	}
+
+	if asInt < min || asInt > max {
+		return 0, fmt.Errorf("arg %s out of range (%d-%d)", key, min, max)
+	}
+
+	return asInt, nil
+}
+
 func openApp(app string) error {
 	if runtime.GOOS != "windows" {
 		return errors.New("OPEN_APP is supported only on Windows")
@@ -189,6 +301,20 @@ func openApp(app string) error {
 	return nil
 }
 
+func sendMediaKeyRepeated(key string, steps int) error {
+	for i := 0; i < steps; i++ {
+		if err := sendMediaKey(key); err != nil {
+			return err
+		}
+
+		if i+1 < steps {
+			time.Sleep(120 * time.Millisecond)
+		}
+	}
+
+	return nil
+}
+
 func sendMediaKey(key string) error {
 	if runtime.GOOS != "windows" {
 		return errors.New("media keys are supported only on Windows")
@@ -199,6 +325,45 @@ func sendMediaKey(key string) error {
 
 	if err := runWithTimeout(cmd, commandTimeout); err != nil {
 		return fmt.Errorf("send key %s: %w", key, err)
+	}
+
+	return nil
+}
+
+func sleepPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_SLEEP is supported only on Windows")
+	}
+
+	cmd := exec.Command("cmd", "/C", "start", "", "cmd", "/C", "timeout /t 2 /nobreak >nul & rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("schedule sleep: %w", err)
+	}
+
+	return nil
+}
+
+func shutdownPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_SHUTDOWN is supported only on Windows")
+	}
+
+	cmd := exec.Command("shutdown.exe", "/s", "/t", "5")
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("schedule shutdown: %w", err)
+	}
+
+	return nil
+}
+
+func restartPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_RESTART is supported only on Windows")
+	}
+
+	cmd := exec.Command("shutdown.exe", "/r", "/t", "5")
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("schedule restart: %w", err)
 	}
 
 	return nil

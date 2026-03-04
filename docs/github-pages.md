@@ -34,6 +34,7 @@ Inside the app:
 - Set `API base URL` to your server origin, for example `https://mpmc.ddns.net`
 - Paste `PHONE_API_TOKEN`
 - Tap `Load Devices`
+- Use `Agent Update` section when you want to push a new agent binary
 
 Tip:
 

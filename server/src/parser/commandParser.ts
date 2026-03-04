@@ -1,55 +1,129 @@
-import type { ParseError, ParsedExternalCommand, TypedCommand } from "../types/protocol";
+import type { CommandType, ParseError, ParsedExternalCommand, TypedCommand } from "../types/protocol";
 
-const OPEN_APP_ALLOWLIST = new Set(["spotify", "discord", "chrome"]);
 const MAX_NOTIFY_TEXT_LENGTH = 180;
+const MAX_REPEAT_STEPS = 20;
+
+const OPEN_APP_ALIASES: Record<string, string> = {
+  spotify: "spotify",
+  discord: "discord",
+  chrome: "chrome",
+  steam: "steam",
+  explorer: "explorer",
+  "file explorer": "explorer",
+  vscode: "vscode",
+  "vs code": "vscode",
+  "visual studio code": "vscode",
+  edge: "edge",
+  "microsoft edge": "edge",
+  firefox: "firefox",
+  notepad: "notepad",
+  calculator: "calculator",
+  calc: "calculator",
+  settings: "settings",
+  slack: "slack",
+  teams: "teams",
+  taskmanager: "taskmanager",
+  "task manager": "taskmanager",
+};
+
+const OPEN_APP_ALLOWLIST = new Set(Object.values(OPEN_APP_ALIASES));
+const OPEN_PREFIXES = ["open ", "launch ", "start "];
+
+const EXACT_COMMANDS: Record<string, CommandType> = {
+  ping: "PING",
+  status: "PING",
+  play: "MEDIA_PLAY",
+  resume: "MEDIA_PLAY",
+  pause: "MEDIA_PAUSE",
+  "play pause": "MEDIA_PLAY_PAUSE",
+  toggle: "MEDIA_PLAY_PAUSE",
+  mute: "MUTE",
+  "mute volume": "MUTE",
+  lock: "LOCK_PC",
+  "lock pc": "LOCK_PC",
+  sleep: "SYSTEM_SLEEP",
+  "sleep pc": "SYSTEM_SLEEP",
+  shutdown: "SYSTEM_SHUTDOWN",
+  "shut down": "SYSTEM_SHUTDOWN",
+  "shutdown pc": "SYSTEM_SHUTDOWN",
+  restart: "SYSTEM_RESTART",
+  reboot: "SYSTEM_RESTART",
+  "restart pc": "SYSTEM_RESTART",
+};
 
 function normalized(text: string): string {
   return text.toLowerCase().trim().replace(/\s+/g, " ");
 }
 
-function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
-  if (commandPhrase === "ping") {
-    return { type: "PING", args: {} };
+function buildNoArgCommand(type: CommandType): TypedCommand {
+  return { type, args: {} };
+}
+
+function parseRepeatSteps(
+  commandPhrase: string,
+  prefixes: string[],
+  type: "MEDIA_NEXT" | "MEDIA_PREVIOUS" | "VOLUME_UP" | "VOLUME_DOWN",
+): TypedCommand | ParseError | null {
+  for (const prefix of prefixes) {
+    if (!commandPhrase.startsWith(prefix)) {
+      continue;
+    }
+
+    const suffix = commandPhrase.slice(prefix.length).trim();
+    if (!suffix) {
+      return buildNoArgCommand(type);
+    }
+
+    if (!/^\d+$/.test(suffix)) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `${prefix.trim()} supports optional numeric steps only`,
+      };
+    }
+
+    const steps = Number.parseInt(suffix, 10);
+    if (!Number.isFinite(steps) || steps < 1 || steps > MAX_REPEAT_STEPS) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `${prefix.trim()} steps must be between 1 and ${MAX_REPEAT_STEPS}`,
+      };
+    }
+
+    return {
+      type,
+      args: steps > 1 ? { steps } : {},
+    };
   }
 
-  if (commandPhrase === "play") {
-    return { type: "MEDIA_PLAY", args: {} };
+  return null;
+}
+
+function parseOpenApp(commandPhrase: string): TypedCommand | ParseError | null {
+  if (commandPhrase === "open" || commandPhrase === "launch" || commandPhrase === "start") {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: "open requires an app name",
+    };
   }
 
-  if (commandPhrase === "pause") {
-    return { type: "MEDIA_PAUSE", args: {} };
-  }
+  for (const prefix of OPEN_PREFIXES) {
+    if (!commandPhrase.startsWith(prefix)) {
+      continue;
+    }
 
-  if (commandPhrase === "next") {
-    return { type: "MEDIA_NEXT", args: {} };
-  }
+    const rawApp = commandPhrase.slice(prefix.length).trim();
+    if (!rawApp) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "open requires an app name",
+      };
+    }
 
-  if (commandPhrase === "previous") {
-    return { type: "MEDIA_PREVIOUS", args: {} };
-  }
-
-  if (commandPhrase === "volume up") {
-    return { type: "VOLUME_UP", args: {} };
-  }
-
-  if (commandPhrase === "volume down") {
-    return { type: "VOLUME_DOWN", args: {} };
-  }
-
-  if (commandPhrase === "mute") {
-    return { type: "MUTE", args: {} };
-  }
-
-  if (commandPhrase === "lock") {
-    return { type: "LOCK_PC", args: {} };
-  }
-
-  if (commandPhrase.startsWith("open ")) {
-    const app = commandPhrase.slice(5).trim();
+    const app = OPEN_APP_ALIASES[rawApp] ?? rawApp;
     if (!OPEN_APP_ALLOWLIST.has(app)) {
       return {
         code: "UNKNOWN_COMMAND",
-        message: `Unknown or blocked app: ${app}`,
+        message: `Unknown or blocked app: ${rawApp}`,
       };
     }
 
@@ -59,26 +133,65 @@ function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
     };
   }
 
-  if (commandPhrase.startsWith("notify ")) {
-    const text = commandPhrase.slice(7).trim();
-    if (!text) {
-      return {
-        code: "MALFORMED_ARGUMENT",
-        message: "notify requires message text",
-      };
-    }
+  return null;
+}
 
-    if (text.length > MAX_NOTIFY_TEXT_LENGTH) {
-      return {
-        code: "MALFORMED_ARGUMENT",
-        message: `notify text too long (max ${MAX_NOTIFY_TEXT_LENGTH})`,
-      };
-    }
-
+function parseNotify(commandPhrase: string): TypedCommand | ParseError | null {
+  if (commandPhrase === "notify") {
     return {
-      type: "NOTIFY",
-      args: { text },
+      code: "MALFORMED_ARGUMENT",
+      message: "notify requires message text",
     };
+  }
+
+  if (!commandPhrase.startsWith("notify ")) {
+    return null;
+  }
+
+  const text = commandPhrase.slice(7).trim();
+  if (!text) {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: "notify requires message text",
+    };
+  }
+
+  if (text.length > MAX_NOTIFY_TEXT_LENGTH) {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: `notify text too long (max ${MAX_NOTIFY_TEXT_LENGTH})`,
+    };
+  }
+
+  return {
+    type: "NOTIFY",
+    args: { text },
+  };
+}
+
+function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
+  const repeatCommand =
+    parseRepeatSteps(commandPhrase, ["volume up", "vol up", "louder", "volume higher"], "VOLUME_UP") ??
+    parseRepeatSteps(commandPhrase, ["volume down", "vol down", "quieter", "volume lower"], "VOLUME_DOWN") ??
+    parseRepeatSteps(commandPhrase, ["next track", "skip track", "next", "skip"], "MEDIA_NEXT") ??
+    parseRepeatSteps(commandPhrase, ["previous track", "previous", "prev", "back"], "MEDIA_PREVIOUS");
+  if (repeatCommand) {
+    return repeatCommand;
+  }
+
+  const exactType = EXACT_COMMANDS[commandPhrase];
+  if (exactType) {
+    return buildNoArgCommand(exactType);
+  }
+
+  const appCommand = parseOpenApp(commandPhrase);
+  if (appCommand) {
+    return appCommand;
+  }
+
+  const notifyCommand = parseNotify(commandPhrase);
+  if (notifyCommand) {
+    return notifyCommand;
   }
 
   return {

@@ -21,10 +21,13 @@ import (
 	"github.com/charliearnerstal/jarvis/agent/internal/config"
 	"github.com/charliearnerstal/jarvis/agent/internal/protocol"
 	"github.com/charliearnerstal/jarvis/agent/internal/startup"
+	"github.com/charliearnerstal/jarvis/agent/internal/updater"
 	"github.com/gorilla/websocket"
 )
 
 const defaultVersion = "0.1.0"
+
+var errRestartRequested = errors.New("agent restart requested")
 
 type enrollRequest struct {
 	BootstrapToken string   `json:"bootstrap_token"`
@@ -126,7 +129,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	runLoop(ctx, cfg)
+	runLoop(ctx, cfg, cfgPath)
 }
 
 func firstRunEnroll(cfgPath string, serverBaseURL string, deviceIDInput string, bootstrapToken string, version string) (*config.Config, error) {
@@ -219,7 +222,7 @@ func firstRunEnroll(cfgPath string, serverBaseURL string, deviceIDInput string, 
 	return cfg, nil
 }
 
-func runLoop(ctx context.Context, cfg *config.Config) {
+func runLoop(ctx context.Context, cfg *config.Config, cfgPath string) {
 	backoff := 2 * time.Second
 
 	for {
@@ -229,8 +232,12 @@ func runLoop(ctx context.Context, cfg *config.Config) {
 		default:
 		}
 
-		err := runSession(ctx, cfg)
+		err := runSession(ctx, cfg, cfgPath)
 		if err == nil {
+			return
+		}
+
+		if errors.Is(err, errRestartRequested) {
 			return
 		}
 
@@ -252,7 +259,7 @@ func runLoop(ctx context.Context, cfg *config.Config) {
 	}
 }
 
-func runSession(ctx context.Context, cfg *config.Config) error {
+func runSession(ctx context.Context, cfg *config.Config, cfgPath string) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	conn, _, err := dialer.Dial(cfg.WSURL, nil)
 	if err != nil {
@@ -342,39 +349,59 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 			kind, _ := base["kind"].(string)
 			switch strings.ToLower(kind) {
 			case "command":
-				var command protocol.CommandEnvelope
-				if err := json.Unmarshal(payload, &command); err != nil {
-					log.Printf("invalid command envelope: %v", err)
-					continue
-				}
-
-				if strings.TrimSpace(command.DeviceID) != cfg.DeviceID {
-					result := protocol.ResultMessage{
-						Kind:       "result",
-						RequestID:  command.RequestID,
-						DeviceID:   cfg.DeviceID,
-						OK:         false,
-						Message:    "device_id mismatch",
-						ErrorCode:  "DEVICE_MISMATCH",
-						CompletedAt: time.Now().UTC().Format(time.RFC3339),
-						Version:    cfg.Version,
+					var command protocol.CommandEnvelope
+					if err := json.Unmarshal(payload, &command); err != nil {
+						log.Printf("invalid command envelope: %v", err)
+						continue
 					}
-					_ = sendJSON(result)
-					continue
-				}
 
-				result := commands.Execute(cfg.DeviceID, cfg.Version, command)
-				if err := sendJSON(result); err != nil {
-					sendError(fmt.Errorf("send result: %w", err))
-					return
-				}
+					if strings.TrimSpace(command.DeviceID) != cfg.DeviceID {
+						result := protocol.ResultMessage{
+							Kind:        "result",
+							RequestID:   command.RequestID,
+							DeviceID:    cfg.DeviceID,
+							OK:          false,
+							Message:     "device_id mismatch",
+							ErrorCode:   "DEVICE_MISMATCH",
+							CompletedAt: time.Now().UTC().Format(time.RFC3339),
+							Version:     cfg.Version,
+						}
+						_ = sendJSON(result)
+						continue
+					}
+
+					if strings.EqualFold(strings.TrimSpace(command.Type), "AGENT_UPDATE") {
+						updateResult, restartRequired := executeUpdateCommand(cfg, cfgPath, command)
+						if err := sendJSON(updateResult); err != nil {
+							if restartRequired {
+								sendError(errRestartRequested)
+								return
+							}
+
+							sendError(fmt.Errorf("send result: %w", err))
+							return
+						}
+
+						if restartRequired {
+							sendError(errRestartRequested)
+							return
+						}
+
+						continue
+					}
+
+					result := commands.Execute(cfg.DeviceID, cfg.Version, command)
+					if err := sendJSON(result); err != nil {
+						sendError(fmt.Errorf("send result: %w", err))
+						return
+					}
 			case "hello_ack", "heartbeat_ack":
 				continue
 			default:
 				log.Printf("unknown message kind from server: %s", kind)
 			}
-		}
-	}()
+			}
+		}()
 
 	select {
 	case <-ctx.Done():
@@ -382,6 +409,38 @@ func runSession(ctx context.Context, cfg *config.Config) error {
 	case err := <-errorCh:
 		return err
 	}
+}
+
+func executeUpdateCommand(cfg *config.Config, cfgPath string, command protocol.CommandEnvelope) (protocol.ResultMessage, bool) {
+	result := protocol.ResultMessage{
+		Kind:        "result",
+		RequestID:   command.RequestID,
+		DeviceID:    cfg.DeviceID,
+		CompletedAt: time.Now().UTC().Format(time.RFC3339),
+		Version:     cfg.Version,
+	}
+
+	executablePath, err := os.Executable()
+	if err != nil {
+		result.OK = false
+		result.ErrorCode = "UPDATE_FAILED"
+		result.Message = fmt.Sprintf("resolve executable path: %v", err)
+		return result, false
+	}
+
+	applyResult, err := updater.Apply(command.Args, executablePath, cfgPath)
+	if err != nil {
+		result.OK = false
+		result.ErrorCode = "UPDATE_FAILED"
+		result.Message = err.Error()
+		result.Version = cfg.Version
+		return result, false
+	}
+
+	result.OK = true
+	result.Message = applyResult.Message
+	result.Version = cfg.Version
+	return result, applyResult.RestartRequired
 }
 
 func normalizeBaseURL(input string) string {
