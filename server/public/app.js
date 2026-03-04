@@ -1,17 +1,27 @@
 const apiBaseInput = document.getElementById("apiBaseInput");
 const tokenInput = document.getElementById("tokenInput");
 const saveTokenBtn = document.getElementById("saveTokenBtn");
+const testTokenBtn = document.getElementById("testTokenBtn");
 const loadDevicesBtn = document.getElementById("loadDevicesBtn");
 const deviceSummary = document.getElementById("deviceSummary");
+const deviceCards = document.getElementById("deviceCards");
 const deviceList = document.getElementById("deviceList");
+const authHint = document.getElementById("authHint");
+const connectionBadge = document.getElementById("connectionBadge");
+const lastSuccessLabel = document.getElementById("lastSuccessLabel");
 const targetInput = document.getElementById("targetInput");
 const actionSelect = document.getElementById("actionSelect");
 const argInput = document.getElementById("argInput");
+const dangerZone = document.getElementById("dangerZone");
 const composeBtn = document.getElementById("composeBtn");
 const speakBtn = document.getElementById("speakBtn");
 const sendBtn = document.getElementById("sendBtn");
 const commandText = document.getElementById("commandText");
 const resultBox = document.getElementById("resultBox");
+const resultStatus = document.getElementById("resultStatus");
+const resultRequestId = document.getElementById("resultRequestId");
+const resultLatency = document.getElementById("resultLatency");
+const resultMessage = document.getElementById("resultMessage");
 const speechInfo = document.getElementById("speechInfo");
 const updateTargetInput = document.getElementById("updateTargetInput");
 const updateVersionInput = document.getElementById("updateVersionInput");
@@ -28,6 +38,23 @@ const UPDATE_VERSION_KEY = "jarvis_update_version";
 const UPDATE_URL_KEY = "jarvis_update_url";
 const UPDATE_SHA_KEY = "jarvis_update_sha";
 const UPDATE_SIZE_KEY = "jarvis_update_size";
+const LAST_COMMAND_SUCCESS_KEY = "jarvis_last_command_success";
+const BOOTSTRAP_COMMAND_KEY = "jarvis_bootstrap_command";
+const BOOTSTRAP_ACTION_KEY = "jarvis_bootstrap_action";
+const BOOTSTRAP_ARG_KEY = "jarvis_bootstrap_arg";
+
+const POLL_INTERVAL_MS = 30000;
+const dangerousActions = new Set(["shutdown", "restart", "sleep"]);
+
+let pollTimer = null;
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 function nowRequestId() {
   return "web-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
@@ -122,9 +149,29 @@ function apiUrl(path) {
 function applyBootstrapLink() {
   const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
   const query = new URLSearchParams(window.location.search);
+  const read = (key) => {
+    const fromHash = hash.get(key);
+    if (fromHash != null && fromHash !== "") {
+      return fromHash;
+    }
+    const fromQuery = query.get(key);
+    if (fromQuery != null && fromQuery !== "") {
+      return fromQuery;
+    }
+    return "";
+  };
 
-  const token = hash.get("token") || query.get("token");
-  const api = hash.get("api") || query.get("api");
+  const token = read("token");
+  const api = read("api");
+  const target = read("target");
+  const action = read("action");
+  const arg = read("arg");
+  const command = read("command");
+  const updateTarget = read("update_target");
+  const updateVersion = read("update_version");
+  const updateUrl = read("update_url");
+  const updateSha = read("update_sha");
+  const updateSize = read("update_size");
 
   let applied = false;
 
@@ -138,10 +185,61 @@ function applyBootstrapLink() {
     applied = true;
   }
 
+  if (target) {
+    localStorage.setItem(TARGET_KEY, target.trim().toLowerCase());
+    applied = true;
+  }
+
+  if (updateTarget) {
+    localStorage.setItem(UPDATE_TARGET_KEY, updateTarget.trim().toLowerCase());
+    applied = true;
+  } else if (target) {
+    localStorage.setItem(UPDATE_TARGET_KEY, target.trim().toLowerCase());
+  }
+
+  if (updateVersion) {
+    localStorage.setItem(UPDATE_VERSION_KEY, updateVersion.trim());
+    applied = true;
+  }
+
+  if (updateUrl) {
+    localStorage.setItem(UPDATE_URL_KEY, updateUrl.trim());
+    applied = true;
+  }
+
+  if (updateSha) {
+    localStorage.setItem(UPDATE_SHA_KEY, updateSha.trim().toLowerCase());
+    applied = true;
+  }
+
+  if (updateSize) {
+    localStorage.setItem(UPDATE_SIZE_KEY, updateSize.trim());
+    applied = true;
+  }
+
+  if (command) {
+    localStorage.setItem(BOOTSTRAP_COMMAND_KEY, command.trim().toLowerCase());
+    applied = true;
+  } else if (target && action) {
+    const pairArg = arg ? ` ${arg.trim()}` : "";
+    localStorage.setItem(BOOTSTRAP_COMMAND_KEY, `${target.trim().toLowerCase()} ${action.trim().toLowerCase()}${pairArg}`);
+    applied = true;
+  }
+
+  if (action) {
+    localStorage.setItem(BOOTSTRAP_ACTION_KEY, action.trim().toLowerCase());
+    applied = true;
+  }
+
+  if (arg) {
+    localStorage.setItem(BOOTSTRAP_ARG_KEY, arg.trim());
+    applied = true;
+  }
+
   if (applied) {
     const cleanPath = window.location.pathname;
     window.history.replaceState({}, document.title, cleanPath);
-    setResult("Connection configured from pairing link.");
+    setResult("Connection configured from pairing link. Fields were auto-filled.");
   }
 }
 
@@ -153,7 +251,88 @@ function setToken(token) {
   localStorage.setItem(TOKEN_KEY, token);
 }
 
-function setResult(payload) {
+function toLocalTimestamp(isoTime) {
+  if (!isoTime) {
+    return "never";
+  }
+
+  const date = new Date(isoTime);
+  if (Number.isNaN(date.getTime())) {
+    return "never";
+  }
+
+  return date.toLocaleString();
+}
+
+function setLastCommandSuccess(isoTime) {
+  const value = isoTime || new Date().toISOString();
+  localStorage.setItem(LAST_COMMAND_SUCCESS_KEY, value);
+  lastSuccessLabel.textContent = `Last success: ${toLocalTimestamp(value)}`;
+}
+
+function loadLastCommandSuccess() {
+  const value = localStorage.getItem(LAST_COMMAND_SUCCESS_KEY);
+  lastSuccessLabel.textContent = `Last success: ${toLocalTimestamp(value)}`;
+}
+
+function setConnectionStatus(status) {
+  connectionBadge.classList.remove("connected", "disconnected", "retrying");
+
+  if (status === "connected") {
+    connectionBadge.textContent = "Connected";
+    connectionBadge.classList.add("connected");
+    return;
+  }
+
+  if (status === "retrying") {
+    connectionBadge.textContent = "Retrying";
+    connectionBadge.classList.add("retrying");
+    return;
+  }
+
+  connectionBadge.textContent = "Disconnected";
+  connectionBadge.classList.add("disconnected");
+}
+
+function setAuthHint(text, isError = false) {
+  authHint.textContent = text || "";
+  authHint.style.color = isError ? "#ffb4b8" : "";
+}
+
+function setResult(payload, context = {}) {
+  const isError = context.isError === true;
+  let message = typeof payload === "string" ? payload : "";
+  let requestId = context.requestId || "-";
+  let statusLabel = isError ? "error" : "ok";
+  let latencyLabel = context.latencyMs != null ? `${Math.round(context.latencyMs)} ms` : "-";
+
+  if (typeof payload === "object" && payload) {
+    const okValue = payload.ok;
+    if (okValue === false) {
+      statusLabel = "error";
+    }
+    if (okValue === true && !isError) {
+      statusLabel = "ok";
+    }
+
+    if (!message) {
+      message = payload.message || payload.error || payload.raw || JSON.stringify(payload);
+    }
+
+    if (!context.requestId) {
+      requestId = payload.request_id || payload.requestId || "-";
+    }
+  }
+
+  if (!message) {
+    message = isError ? "Request failed." : "Done.";
+  }
+
+  resultStatus.textContent = statusLabel;
+  resultStatus.className = `result-val ${statusLabel === "error" ? "error" : "ok"}`;
+  resultRequestId.textContent = requestId;
+  resultLatency.textContent = latencyLabel;
+  resultMessage.textContent = message;
   resultBox.textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
 }
 
@@ -177,26 +356,52 @@ function composeCommand() {
   return `${target} ${action}`;
 }
 
-async function apiRequest(path, payload) {
+function updateDangerZone() {
+  const action = (actionSelect.value || "").trim().toLowerCase();
+  dangerZone.classList.toggle("hidden", !dangerousActions.has(action));
+}
+
+function parseApiErrorMessage(status, dataMessage) {
+  if (status === 401 || status === 403) {
+    return "Authentication failed. Check PHONE_API_TOKEN and save again.";
+  }
+  if (status === 404) {
+    return "API endpoint not found. Verify API base URL.";
+  }
+  return dataMessage || `HTTP ${status}`;
+}
+
+async function apiRequest(path, payload, options = {}) {
   const token = getToken();
   if (!token) {
+    setConnectionStatus("disconnected");
     throw new Error("Set your API token first.");
   }
 
   const endpoint = apiUrl(path);
   if (window.location.protocol === "https:" && endpoint.startsWith("http://")) {
-    throw new Error("Mixed content blocked. Set API base URL to https://mpmc.ddns.net.");
+    setConnectionStatus("disconnected");
+    throw new Error("Mixed content blocked. Set API base URL to an HTTPS endpoint.");
   }
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify(payload),
-  });
+  const method = options.method || "POST";
+  const start = performance.now();
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method,
+      headers: {
+        ...(payload ? { "Content-Type": "application/json" } : {}),
+        Authorization: `Bearer ${token}`,
+      },
+      ...(payload ? { body: JSON.stringify(payload) } : {}),
+    });
+  } catch {
+    setConnectionStatus("retrying");
+    throw new Error("Cannot reach server. Connection is retrying.");
+  }
 
+  const latencyMs = performance.now() - start;
   const text = await response.text();
   let data;
   try {
@@ -206,36 +411,31 @@ async function apiRequest(path, payload) {
   }
 
   if (!response.ok) {
-    const errorMessage = data && data.message ? data.message : `HTTP ${response.status}`;
-    throw new Error(errorMessage);
+    const message = parseApiErrorMessage(response.status, data && data.message);
+    if (response.status === 401 || response.status === 403) {
+      setConnectionStatus("disconnected");
+    } else {
+      setConnectionStatus("retrying");
+    }
+    throw new ApiError(message, response.status);
   }
 
-  return data;
+  setConnectionStatus("connected");
+  return { data, latencyMs };
 }
 
-async function loadDevices() {
-  const token = getToken();
-  if (!token) {
-    throw new Error("Set your API token first.");
+function setTarget(deviceId) {
+  targetInput.value = deviceId;
+  localStorage.setItem(TARGET_KEY, deviceId);
+  commandText.value = composeCommand();
+  if (updateTargetInput) {
+    updateTargetInput.value = deviceId;
+    localStorage.setItem(UPDATE_TARGET_KEY, deviceId);
   }
+}
 
-  const endpoint = apiUrl("/api/devices");
-  if (window.location.protocol === "https:" && endpoint.startsWith("http://")) {
-    throw new Error("Mixed content blocked. Set API base URL to https://mpmc.ddns.net.");
-  }
-
-  const response = await fetch(endpoint, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-  });
-
-  const data = await response.json();
-  if (!response.ok || !data.ok) {
-    throw new Error(data.message || `Failed (${response.status})`);
-  }
-
-  const devices = data.devices || [];
+function renderDeviceCards(devices) {
+  deviceCards.innerHTML = "";
   deviceList.innerHTML = "";
 
   if (devices.length === 0) {
@@ -243,13 +443,61 @@ async function loadDevices() {
     return;
   }
 
-  const online = devices.filter((d) => d.status === "online").length;
+  const online = devices.filter((d) => (d.status || "").toLowerCase() === "online").length;
   deviceSummary.textContent = `${online}/${devices.length} online`;
 
   for (const device of devices) {
+    const deviceId = String(device.device_id || "").trim();
+    const status = String(device.status || "unknown").trim().toLowerCase();
+
+    const card = document.createElement("article");
+    card.className = "device-card";
+    const heading = document.createElement("h3");
+    heading.textContent = deviceId || "unknown-device";
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+
+    const statusPill = document.createElement("span");
+    statusPill.className = `device-status ${status === "online" ? "online" : "offline"}`;
+    statusPill.textContent = status;
+
+    const seen = document.createElement("span");
+    seen.textContent = device.last_seen ? toLocalTimestamp(device.last_seen) : "no heartbeat";
+
+    meta.appendChild(statusPill);
+    meta.appendChild(seen);
+    card.appendChild(heading);
+    card.appendChild(meta);
+
+    const useButton = document.createElement("button");
+    useButton.type = "button";
+    useButton.textContent = "Use Device";
+    useButton.addEventListener("click", () => {
+      if (!deviceId) {
+        return;
+      }
+      setTarget(deviceId.toLowerCase());
+      setResult(`Target set to ${deviceId}.`);
+    });
+    card.appendChild(useButton);
+    deviceCards.appendChild(card);
+
     const li = document.createElement("li");
-    li.textContent = `${device.device_id} - ${device.status}`;
+    li.textContent = `${deviceId} - ${status}`;
     deviceList.appendChild(li);
+  }
+}
+
+async function loadDevices(options = {}) {
+  const { data } = await apiRequest("/api/devices", null, { method: "GET" });
+  if (!data.ok) {
+    throw new Error(data.message || "Failed to load devices.");
+  }
+
+  renderDeviceCards(data.devices || []);
+  if (!options.silent) {
+    setResult("Devices loaded.");
   }
 }
 
@@ -259,16 +507,18 @@ async function sendCommand() {
     throw new Error("Command text is empty.");
   }
 
+  const requestId = nowRequestId();
   const payload = {
-    request_id: nowRequestId(),
+    request_id: requestId,
     text,
     source: "pwa",
     sent_at: new Date().toISOString(),
     client_version: "pwa-v1",
   };
 
-  const result = await apiRequest("/api/command", payload);
-  setResult(result);
+  const { data, latencyMs } = await apiRequest("/api/command", payload);
+  setLastCommandSuccess();
+  setResult(data, { requestId, latencyMs });
 }
 
 async function pushUpdate() {
@@ -300,12 +550,12 @@ async function pushUpdate() {
     if (!Number.isFinite(parsedSize) || parsedSize <= 0) {
       throw new Error("Update size must be a positive integer.");
     }
-
     sizeBytes = parsedSize;
   }
 
+  const requestId = nowRequestId();
   const payload = {
-    request_id: nowRequestId(),
+    request_id: requestId,
     source: "pwa",
     target,
     version,
@@ -314,8 +564,42 @@ async function pushUpdate() {
     ...(sizeBytes ? { size_bytes: sizeBytes } : {}),
   };
 
-  const result = await apiRequest("/api/update", payload);
-  setResult(result);
+  const { data, latencyMs } = await apiRequest("/api/update", payload);
+  setResult(data, { requestId, latencyMs });
+}
+
+async function testToken() {
+  try {
+    setAuthHint("Testing token...");
+    await loadDevices({ silent: true });
+    setAuthHint("Token valid. Device list loaded.");
+    setResult("Token test passed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setAuthHint(message, true);
+    setResult(message, { isError: true });
+  }
+}
+
+function schedulePolling() {
+  if (pollTimer) {
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  if (!getToken()) {
+    return;
+  }
+
+  pollTimer = window.setInterval(async () => {
+    try {
+      await loadDevices({ silent: true });
+    } catch (error) {
+      if (!(error instanceof ApiError) || (error.status !== 401 && error.status !== 403)) {
+        setConnectionStatus("retrying");
+      }
+    }
+  }, POLL_INTERVAL_MS);
 }
 
 function setupSpeech() {
@@ -340,7 +624,7 @@ function setupSpeech() {
   };
 
   recognition.onerror = (event) => {
-    setResult(`Speech error: ${event.error || "unknown"}`);
+    setResult(`Speech error: ${event.error || "unknown"}`, { isError: true });
   };
 
   speakBtn.addEventListener("click", () => {
@@ -354,6 +638,9 @@ function init() {
   setApiBase(apiBaseInput.value);
   apiBaseInput.value = getApiBase();
   tokenInput.value = getToken();
+  loadLastCommandSuccess();
+  setConnectionStatus(getToken() ? "retrying" : "disconnected");
+  updateDangerZone();
 
   const lastTarget = localStorage.getItem(TARGET_KEY);
   if (lastTarget) {
@@ -373,7 +660,29 @@ function init() {
     commandText.value = initialCommand;
   }
 
+  const bootstrapAction = localStorage.getItem(BOOTSTRAP_ACTION_KEY);
+  if (bootstrapAction && actionSelect.querySelector(`option[value="${bootstrapAction}"]`)) {
+    actionSelect.value = bootstrapAction;
+    updateDangerZone();
+  }
+
+  const bootstrapArg = localStorage.getItem(BOOTSTRAP_ARG_KEY);
+  if (bootstrapArg) {
+    argInput.value = bootstrapArg;
+  }
+
+  const bootstrapCommand = localStorage.getItem(BOOTSTRAP_COMMAND_KEY);
+  if (bootstrapCommand) {
+    commandText.value = bootstrapCommand;
+    localStorage.removeItem(BOOTSTRAP_COMMAND_KEY);
+  } else {
+    commandText.value = composeCommand();
+  }
+  localStorage.removeItem(BOOTSTRAP_ACTION_KEY);
+  localStorage.removeItem(BOOTSTRAP_ARG_KEY);
+
   actionSelect.addEventListener("change", () => {
+    updateDangerZone();
     commandText.value = composeCommand();
   });
 
@@ -398,15 +707,25 @@ function init() {
     const apiBase = apiBaseInput.value.trim();
 
     if (!token) {
-      setResult("Token is empty.");
+      setAuthHint("Token is empty.", true);
+      setResult("Token is empty.", { isError: true });
+      setConnectionStatus("disconnected");
       return;
     }
 
     setToken(token);
     setApiBase(apiBase);
     apiBaseInput.value = getApiBase();
+    setAuthHint("Connection settings saved.");
     setResult("Connection settings saved on this device.");
+    schedulePolling();
   });
+
+  if (testTokenBtn) {
+    testTokenBtn.addEventListener("click", async () => {
+      await testToken();
+    });
+  }
 
   if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput) {
     updateTargetInput.addEventListener("change", () => {
@@ -429,9 +748,11 @@ function init() {
   loadDevicesBtn.addEventListener("click", async () => {
     try {
       await loadDevices();
-      setResult("Devices loaded.");
+      setAuthHint("Device list refreshed.");
     } catch (error) {
-      setResult(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setAuthHint(message, true);
+      setResult(message, { isError: true });
     }
   });
 
@@ -441,7 +762,9 @@ function init() {
       sendBtn.textContent = "Sending...";
       await sendCommand();
     } catch (error) {
-      setResult(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setAuthHint(message, true);
+      setResult(message, { isError: true });
     } finally {
       sendBtn.disabled = false;
       sendBtn.textContent = "Send";
@@ -455,7 +778,9 @@ function init() {
         pushUpdateBtn.textContent = "Pushing...";
         await pushUpdate();
       } catch (error) {
-        setResult(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
       } finally {
         pushUpdateBtn.disabled = false;
         pushUpdateBtn.textContent = "Push Update";
@@ -464,6 +789,7 @@ function init() {
   }
 
   setupSpeech();
+  schedulePolling();
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker
@@ -479,14 +805,16 @@ function init() {
   }
 
   if (getToken()) {
-    loadDevices()
+    loadDevices({ silent: true })
       .then(() => {
         if (!resultBox.textContent || resultBox.textContent === "No request yet.") {
           setResult("Devices loaded.");
         }
       })
       .catch((error) => {
-        setResult(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
       });
   }
 }

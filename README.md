@@ -109,7 +109,7 @@ On first start, the server now auto-generates tokens if missing and saves them t
 It also logs:
 
 - `pwa_url`
-- `pwa_pairing_url` (open once on iPhone to auto-fill token + API)
+- `pwa_pairing_url` (open once on iPhone to auto-fill token, API, target, and defaults)
 - `external_pwa_pairing_url` (GitHub Pages pairing link)
 
 Show current effective config anytime:
@@ -163,7 +163,7 @@ Open this URL on iPhone:
 
 Then:
 
-1. Preferred: open the `pwa_pairing_url` printed by server logs (auto-fills token + API)
+1. Preferred: open the `pwa_pairing_url` printed by server logs (auto-fills token, API, target, and default command/update target)
 2. Or paste your `PHONE_API_TOKEN` in the app and tap `Save`
    - Set `API base URL` to your server origin (for same-host deployment this auto-fills)
 3. Tap `Load Devices` to verify connectivity

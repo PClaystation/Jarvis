@@ -20,8 +20,20 @@ function derivePublicHttpOrigin(publicWsUrl: string): string | null {
   }
 }
 
+function buildPairingFragment(apiOrigin: string, token: string): string {
+  const params = new URLSearchParams({
+    api: apiOrigin,
+    token,
+    target: "m1",
+    action: "ping",
+    update_target: "m1",
+  });
+  return params.toString();
+}
+
 const config = loadConfig();
 const publicOrigin = derivePublicHttpOrigin(config.publicWsUrl);
+const pairingFragment = publicOrigin ? buildPairingFragment(publicOrigin, config.phoneApiToken) : null;
 
 const output = {
   host: config.host,
@@ -42,11 +54,11 @@ const output = {
   enforce_https_update_url: config.enforceHttpsUpdateUrl,
   pwa_url: publicOrigin ? `${publicOrigin}/app` : null,
   pwa_pairing_url: publicOrigin
-    ? `${publicOrigin}/app#api=${encodeURIComponent(publicOrigin)}&token=${encodeURIComponent(config.phoneApiToken)}`
+    ? `${publicOrigin}/app#${pairingFragment}`
     : null,
   external_pwa_pairing_url:
     publicOrigin && config.pwaPublicUrl
-      ? `${config.pwaPublicUrl}#api=${encodeURIComponent(publicOrigin)}&token=${encodeURIComponent(config.phoneApiToken)}`
+      ? `${config.pwaPublicUrl}#${pairingFragment}`
       : null,
 };
 

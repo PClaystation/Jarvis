@@ -95,6 +95,17 @@ function normalizePublicUrl(value: string): string | null {
   }
 }
 
+function buildPairingFragment(apiOrigin: string, token: string): string {
+  const params = new URLSearchParams({
+    api: apiOrigin,
+    token,
+    target: "m1",
+    action: "ping",
+    update_target: "m1",
+  });
+  return params.toString();
+}
+
 function isOriginAllowed(origin: string, allowlist: string[]): boolean {
   const normalizedOrigin = normalizeOrigin(origin);
   if (!normalizedOrigin) {
@@ -251,14 +262,15 @@ async function main(): Promise<void> {
   const pwaApiOrigin = derivePwaApiOrigin(config.publicWsUrl, pwaPublicUrl);
   if (publicOrigin && pwaApiOrigin) {
     const pwaUrl = `${publicOrigin}/app`;
-    const pairingUrl = `${pwaUrl}#api=${encodeURIComponent(pwaApiOrigin)}&token=${encodeURIComponent(config.phoneApiToken)}`;
+    const pairingFragment = buildPairingFragment(pwaApiOrigin, config.phoneApiToken);
+    const pairingUrl = `${pwaUrl}#${pairingFragment}`;
 
     log("info", "Quick start links", {
       pwa_url: pwaUrl,
       pwa_pairing_url: pairingUrl,
       external_pwa_url: pwaPublicUrl,
       external_pwa_pairing_url: pwaPublicUrl
-        ? `${pwaPublicUrl}#api=${encodeURIComponent(pwaApiOrigin)}&token=${encodeURIComponent(config.phoneApiToken)}`
+        ? `${pwaPublicUrl}#${pairingFragment}`
         : null,
     });
 

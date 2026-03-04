@@ -284,21 +284,21 @@ func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, ve
 		"  if not errorlevel 1 goto swapped",
 		"  timeout /t 1 /nobreak >nul",
 		")",
-			"start \"\" \"%TARGET%\" --config \"%CONFIG%\"",
+			"start \"\" /B \"%TARGET%\" --config \"%CONFIG%\"",
 			"del /f /q \"%STAGED%\" >nul 2>&1",
 			"del /f /q \"%~f0\" >nul 2>&1",
 			"exit /b 1",
 		":swapped",
 		"move /Y \"%STAGED%\" \"%TARGET%\" >nul 2>&1",
 		"if errorlevel 1 goto rollback",
-			"start \"\" \"%TARGET%\" --config \"%CONFIG%\" --version \"%VERSION%\"",
+			"start \"\" /B \"%TARGET%\" --config \"%CONFIG%\" --version \"%VERSION%\"",
 			"if errorlevel 1 goto rollback",
 		"del /f /q \"%BACKUP%\" >nul 2>&1",
 		"del /f /q \"%~f0\" >nul 2>&1",
 		"exit /b 0",
 		":rollback",
 		"move /Y \"%BACKUP%\" \"%TARGET%\" >nul 2>&1",
-		"start \"\" \"%TARGET%\" --config \"%CONFIG%\"",
+		"start \"\" /B \"%TARGET%\" --config \"%CONFIG%\"",
 		"del /f /q \"%STAGED%\" >nul 2>&1",
 		"del /f /q \"%~f0\" >nul 2>&1",
 		"exit /b 1",
@@ -313,7 +313,8 @@ func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, ve
 }
 
 func launchUpdaterScript(scriptPath string) error {
-	cmd := exec.Command("cmd", "/C", "start", "", "/min", scriptPath)
+	cmd := exec.Command("cmd", "/C", scriptPath)
+	configureHiddenProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
