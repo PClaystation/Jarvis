@@ -1,0 +1,1169 @@
+package commands
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/charliearnerstal/jarvis/a1/internal/protocol"
+)
+
+const commandTimeout = 8 * time.Second
+const adminCommandTimeout = 45 * time.Second
+const maxClipboardTextLength = 1000
+const maxAdminInputLength = 4000
+const maxAdminResultLength = 900
+const maxAdminFileReadBytes = 16 * 1024
+const maxAdminFileWriteBytes = 128 * 1024
+const maxAdminListEntries = 120
+
+var openAppTargets = map[string]string{
+	"spotify":      "spotify:",
+	"discord":      "discord://",
+	"chrome":       "chrome",
+	"steam":        "steam://open/main",
+	"explorer":     "explorer",
+	"vscode":       "code",
+	"edge":         "msedge",
+	"firefox":      "firefox",
+	"notepad":      "notepad",
+	"calculator":   "calc",
+	"settings":     "ms-settings:",
+	"slack":        "slack:",
+	"teams":        "msteams:",
+	"taskmanager":  "taskmgr",
+	"terminal":     "wt",
+	"powershell":   "powershell",
+	"cmd":          "cmd",
+	"controlpanel": "control",
+	"paint":        "mspaint",
+	"snippingtool": "snippingtool",
+}
+
+func Capabilities() []string {
+	return []string{
+		"media_control",
+		"notifications",
+		"clipboard_control",
+		"display_control",
+		"locking",
+		"open_app",
+		"power_control",
+		"session_control",
+		"updater",
+		"admin_ops",
+		"admin_exec",
+		"process_control",
+		"service_control",
+		"filesystem_control",
+		"system_info",
+	}
+}
+
+func Execute(deviceID string, version string, command protocol.CommandEnvelope) (result protocol.ResultMessage) {
+	result = protocol.ResultMessage{
+		Kind:        "result",
+		RequestID:   command.RequestID,
+		DeviceID:    deviceID,
+		CompletedAt: time.Now().UTC().Format(time.RFC3339),
+		Version:     version,
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result.OK = false
+			result.ErrorCode = "AGENT_PANIC"
+			result.Message = "command handler panic recovered"
+		}
+	}()
+
+	handleErr := func(err error, code string) protocol.ResultMessage {
+		result.OK = false
+		result.ErrorCode = code
+		result.Message = err.Error()
+		return result
+	}
+
+	switch strings.ToUpper(command.Type) {
+	case "PING":
+		result.OK = true
+		result.Message = fmt.Sprintf("%s is online", deviceID)
+		return result
+	case "OPEN_APP":
+		app, err := readStringArg(command.Args, "app")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := openApp(app); err != nil {
+			return handleErr(err, "OPEN_APP_FAILED")
+		}
+
+		result.OK = true
+		result.Message = fmt.Sprintf("Opened %s", app)
+		return result
+	case "MEDIA_PLAY":
+		if err := sendMediaKey("MEDIA_PLAY_PAUSE"); err != nil {
+			return handleErr(err, "MEDIA_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Play command sent"
+		return result
+	case "MEDIA_PAUSE":
+		if err := sendMediaKey("MEDIA_PLAY_PAUSE"); err != nil {
+			return handleErr(err, "MEDIA_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Pause command sent"
+		return result
+	case "MEDIA_PLAY_PAUSE":
+		if err := sendMediaKey("MEDIA_PLAY_PAUSE"); err != nil {
+			return handleErr(err, "MEDIA_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Play/pause toggled"
+		return result
+	case "MEDIA_NEXT":
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("MEDIA_NEXT_TRACK", steps); err != nil {
+			return handleErr(err, "MEDIA_FAILED")
+		}
+
+		result.OK = true
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Next track command sent x%d", steps)
+		} else {
+			result.Message = "Next track command sent"
+		}
+		return result
+	case "MEDIA_PREVIOUS":
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("MEDIA_PREV_TRACK", steps); err != nil {
+			return handleErr(err, "MEDIA_FAILED")
+		}
+
+		result.OK = true
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Previous track command sent x%d", steps)
+		} else {
+			result.Message = "Previous track command sent"
+		}
+		return result
+	case "VOLUME_UP":
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("VOLUME_UP", steps); err != nil {
+			return handleErr(err, "VOLUME_FAILED")
+		}
+
+		result.OK = true
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Volume up command sent x%d", steps)
+		} else {
+			result.Message = "Volume up command sent"
+		}
+		return result
+	case "VOLUME_DOWN":
+		steps, err := readOptionalIntArg(command.Args, "steps", 1, 1, 20)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendMediaKeyRepeated("VOLUME_DOWN", steps); err != nil {
+			return handleErr(err, "VOLUME_FAILED")
+		}
+
+		result.OK = true
+		if steps > 1 {
+			result.Message = fmt.Sprintf("Volume down command sent x%d", steps)
+		} else {
+			result.Message = "Volume down command sent"
+		}
+		return result
+	case "MUTE":
+		if err := sendMediaKey("VOLUME_MUTE"); err != nil {
+			return handleErr(err, "VOLUME_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Mute command sent"
+		return result
+	case "LOCK_PC":
+		if err := lockPC(); err != nil {
+			return handleErr(err, "LOCK_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "PC locked"
+		return result
+	case "NOTIFY":
+		text, err := readStringArg(command.Args, "text")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := notify(text); err != nil {
+			return handleErr(err, "NOTIFY_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Notification shown"
+		return result
+	case "CLIPBOARD_SET":
+		text, err := readStringArg(command.Args, "text")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := setClipboard(text); err != nil {
+			return handleErr(err, "CLIPBOARD_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Clipboard updated"
+		return result
+	case "SYSTEM_SLEEP":
+		if err := sleepPC(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Sleep command scheduled"
+		return result
+	case "SYSTEM_DISPLAY_OFF":
+		if err := displayOff(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Display turned off"
+		return result
+	case "SYSTEM_SIGN_OUT":
+		if err := signOut(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Sign out started"
+		return result
+	case "SYSTEM_SHUTDOWN":
+		if err := shutdownPC(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Shutdown scheduled (5s)"
+		return result
+	case "SYSTEM_RESTART":
+		if err := restartPC(); err != nil {
+			return handleErr(err, "POWER_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Restart scheduled (5s)"
+		return result
+	case "ADMIN_EXEC_CMD":
+		commandText, err := readStringArg(command.Args, "command")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := executeAdminCmd(commandText)
+		if err != nil {
+			return handleErr(err, "ADMIN_EXEC_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "ADMIN_EXEC_POWERSHELL":
+		script, err := readStringArg(command.Args, "script")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := executeAdminPowerShell(script)
+		if err != nil {
+			return handleErr(err, "ADMIN_EXEC_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "PROCESS_LIST":
+		filter, err := readOptionalStringArg(command.Args, "filter", "")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := listProcesses(filter)
+		if err != nil {
+			return handleErr(err, "PROCESS_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "PROCESS_KILL":
+		target, err := readStringArg(command.Args, "target")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		force, err := readOptionalBoolArg(command.Args, "force", true)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := killProcess(target, force)
+		if err != nil {
+			return handleErr(err, "PROCESS_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "SERVICE_LIST":
+		filter, err := readOptionalStringArg(command.Args, "filter", "")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := listServices(filter)
+		if err != nil {
+			return handleErr(err, "SERVICE_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "SERVICE_CONTROL":
+		action, err := readStringArg(command.Args, "action")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		name, err := readStringArg(command.Args, "name")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := controlService(action, name)
+		if err != nil {
+			return handleErr(err, "SERVICE_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_READ":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		maxBytes, err := readOptionalIntArg(command.Args, "max_bytes", maxAdminFileReadBytes, 1, maxAdminFileReadBytes)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := readFileText(path, maxBytes)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_WRITE":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		text, err := readStringArg(command.Args, "text")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := writeFileText(path, text, false)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_APPEND":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		text, err := readStringArg(command.Args, "text")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := writeFileText(path, text, true)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_DELETE":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := deletePath(path)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_LIST":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := listPath(path)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_MKDIR":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := makeDir(path)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "SYSTEM_INFO":
+		output, err := collectSystemInfo()
+		if err != nil {
+			return handleErr(err, "INFO_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	default:
+		return handleErr(fmt.Errorf("unknown command type: %s", command.Type), "UNKNOWN_TYPE")
+	}
+}
+
+func readStringArg(args map[string]any, key string) (string, error) {
+	value, ok := args[key]
+	if !ok {
+		return "", fmt.Errorf("missing arg: %s", key)
+	}
+
+	asString, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("arg must be string: %s", key)
+	}
+
+	asString = strings.TrimSpace(asString)
+	if asString == "" {
+		return "", fmt.Errorf("arg must not be empty: %s", key)
+	}
+
+	return asString, nil
+}
+
+func readOptionalIntArg(args map[string]any, key string, fallback int, min int, max int) (int, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+
+	var asInt int
+	switch typed := value.(type) {
+	case float64:
+		if math.Trunc(typed) != typed {
+			return 0, fmt.Errorf("arg must be integer: %s", key)
+		}
+
+		maxInt := int64(^uint(0) >> 1)
+		minInt := -maxInt - 1
+		if typed > float64(maxInt) || typed < float64(minInt) {
+			return 0, fmt.Errorf("arg out of range: %s", key)
+		}
+		asInt = int(typed)
+	case int:
+		asInt = typed
+	case int32:
+		asInt = int(typed)
+	case int64:
+		maxInt := int64(^uint(0) >> 1)
+		minInt := -maxInt - 1
+		if typed > maxInt || typed < minInt {
+			return 0, fmt.Errorf("arg out of range: %s", key)
+		}
+		asInt = int(typed)
+	default:
+		return 0, fmt.Errorf("arg must be number: %s", key)
+	}
+
+	if asInt < min || asInt > max {
+		return 0, fmt.Errorf("arg %s out of range (%d-%d)", key, min, max)
+	}
+
+	return asInt, nil
+}
+
+func readOptionalBoolArg(args map[string]any, key string, fallback bool) (bool, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+
+	switch typed := value.(type) {
+	case bool:
+		return typed, nil
+	case string:
+		normalized := strings.ToLower(strings.TrimSpace(typed))
+		switch normalized {
+		case "1", "true", "yes", "y", "on":
+			return true, nil
+		case "0", "false", "no", "n", "off":
+			return false, nil
+		default:
+			return false, fmt.Errorf("arg must be bool: %s", key)
+		}
+	default:
+		return false, fmt.Errorf("arg must be bool: %s", key)
+	}
+}
+
+func readOptionalStringArg(args map[string]any, key string, fallback string) (string, error) {
+	value, ok := args[key]
+	if !ok {
+		return fallback, nil
+	}
+
+	asString, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("arg must be string: %s", key)
+	}
+
+	return strings.TrimSpace(asString), nil
+}
+
+func openApp(app string) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("OPEN_APP is supported only on Windows")
+	}
+
+	target, ok := openAppTargets[strings.ToLower(strings.TrimSpace(app))]
+	if !ok {
+		return fmt.Errorf("app not allowlisted: %s", app)
+	}
+
+	cmd := exec.Command("cmd", "/C", "start", "", target)
+	configureHiddenProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("launch %s: %w", app, err)
+	}
+
+	return nil
+}
+
+func sendMediaKeyRepeated(key string, steps int) error {
+	for i := 0; i < steps; i++ {
+		if err := sendMediaKey(key); err != nil {
+			return err
+		}
+
+		if i+1 < steps {
+			time.Sleep(120 * time.Millisecond)
+		}
+	}
+
+	return nil
+}
+
+func sendMediaKey(key string) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("media keys are supported only on Windows")
+	}
+
+	script := fmt.Sprintf("(New-Object -ComObject WScript.Shell).SendKeys('{%s}')", key)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("send key %s: %w", key, err)
+	}
+
+	return nil
+}
+
+func sleepPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_SLEEP is supported only on Windows")
+	}
+
+	cmd := exec.Command("cmd", "/C", "start", "", "cmd", "/C", "timeout /t 2 /nobreak >nul & rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+	configureHiddenProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("schedule sleep: %w", err)
+	}
+
+	return nil
+}
+
+func shutdownPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_SHUTDOWN is supported only on Windows")
+	}
+
+	cmd := exec.Command("shutdown.exe", "/s", "/t", "5")
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("schedule shutdown: %w", err)
+	}
+
+	return nil
+}
+
+func restartPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_RESTART is supported only on Windows")
+	}
+
+	cmd := exec.Command("shutdown.exe", "/r", "/t", "5")
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("schedule restart: %w", err)
+	}
+
+	return nil
+}
+
+func lockPC() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("LOCK_PC is supported only on Windows")
+	}
+
+	cmd := exec.Command("rundll32.exe", "user32.dll,LockWorkStation")
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("lock workstation: %w", err)
+	}
+
+	return nil
+}
+
+func notify(text string) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("NOTIFY is supported only on Windows")
+	}
+
+	if len(text) > 180 {
+		return errors.New("notification text too long")
+	}
+
+	escaped := strings.ReplaceAll(text, "'", "''")
+	script := fmt.Sprintf("$w = New-Object -ComObject WScript.Shell; $null = $w.Popup('%s', 3, 'Jarvis', 64)", escaped)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("show notification: %w", err)
+	}
+
+	return nil
+}
+
+func setClipboard(text string) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("CLIPBOARD_SET is supported only on Windows")
+	}
+
+	if len(text) > maxClipboardTextLength {
+		return fmt.Errorf("clipboard text too long (max %d)", maxClipboardTextLength)
+	}
+
+	escaped := strings.ReplaceAll(text, "'", "''")
+	script := fmt.Sprintf("Set-Clipboard -Value '%s'", escaped)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("set clipboard: %w", err)
+	}
+
+	return nil
+}
+
+func displayOff() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_DISPLAY_OFF is supported only on Windows")
+	}
+
+	script := "$signature = '[DllImport(\"user32.dll\")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);'; Add-Type -MemberDefinition $signature -Name NativeMethods -Namespace Jarvis | Out-Null; [void][Jarvis.NativeMethods]::SendMessage([IntPtr]0xffff, 0x0112, [IntPtr]0xF170, [IntPtr]2)"
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("turn display off: %w", err)
+	}
+
+	return nil
+}
+
+func signOut() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("SYSTEM_SIGN_OUT is supported only on Windows")
+	}
+
+	cmd := exec.Command("shutdown.exe", "/l")
+	if err := runWithTimeout(cmd, commandTimeout); err != nil {
+		return fmt.Errorf("sign out: %w", err)
+	}
+
+	return nil
+}
+
+func executeAdminCmd(commandText string) (string, error) {
+	trimmed := strings.TrimSpace(commandText)
+	if trimmed == "" {
+		return "", errors.New("command must not be empty")
+	}
+
+	if len(trimmed) > maxAdminInputLength {
+		return "", fmt.Errorf("command too long (max %d)", maxAdminInputLength)
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("ADMIN_EXEC_CMD is supported only on Windows")
+	}
+
+	cmd := exec.Command("cmd", "/C", trimmed)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func executeAdminPowerShell(script string) (string, error) {
+	trimmed := strings.TrimSpace(script)
+	if trimmed == "" {
+		return "", errors.New("script must not be empty")
+	}
+
+	if len(trimmed) > maxAdminInputLength {
+		return "", fmt.Errorf("script too long (max %d)", maxAdminInputLength)
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("ADMIN_EXEC_POWERSHELL is supported only on Windows")
+	}
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", trimmed)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func listProcesses(filter string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("PROCESS_LIST is supported only on Windows")
+	}
+
+	filter = strings.TrimSpace(filter)
+	filterClause := ""
+	if filter != "" {
+		escapedFilter := strings.ReplaceAll(filter, "'", "''")
+		filterClause = fmt.Sprintf(` | Where-Object { $_.ProcessName -like '*%s*' }`, escapedFilter)
+	}
+
+	script := fmt.Sprintf(`
+Get-Process%s |
+  Sort-Object ProcessName |
+  Select-Object -First %d Id,ProcessName,CPU,WS |
+  Format-Table -AutoSize |
+  Out-String -Width 4096
+`, filterClause, maxAdminListEntries)
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func killProcess(target string, force bool) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("PROCESS_KILL is supported only on Windows")
+	}
+
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", errors.New("target must not be empty")
+	}
+
+	forceFlag := ""
+	if force {
+		forceFlag = " -Force"
+	}
+
+	if pid, err := strconv.Atoi(target); err == nil {
+		script := fmt.Sprintf("Stop-Process -Id %d%s -ErrorAction Stop", pid, forceFlag)
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+		if _, runErr := runWithOutputTimeout(cmd, adminCommandTimeout); runErr != nil {
+			return "", runErr
+		}
+
+		return clampResultMessage(fmt.Sprintf("Stopped process id %d", pid)), nil
+	}
+
+	escaped := strings.ReplaceAll(target, "'", "''")
+	script := fmt.Sprintf("Stop-Process -Name '%s'%s -ErrorAction Stop", escaped, forceFlag)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	if _, runErr := runWithOutputTimeout(cmd, adminCommandTimeout); runErr != nil {
+		return "", runErr
+	}
+
+	return clampResultMessage(fmt.Sprintf("Stopped process %s", target)), nil
+}
+
+func listServices(filter string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("SERVICE_LIST is supported only on Windows")
+	}
+
+	filter = strings.TrimSpace(filter)
+	filterClause := ""
+	if filter != "" {
+		escapedFilter := strings.ReplaceAll(filter, "'", "''")
+		filterClause = fmt.Sprintf(` | Where-Object { $_.Name -like '*%s*' -or $_.DisplayName -like '*%s*' }`, escapedFilter, escapedFilter)
+	}
+
+	script := fmt.Sprintf(`
+Get-Service%s |
+  Sort-Object Name |
+  Select-Object -First %d Name,DisplayName,Status,StartType |
+  Format-Table -AutoSize |
+  Out-String -Width 4096
+`, filterClause, maxAdminListEntries)
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func controlService(action string, name string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("SERVICE_CONTROL is supported only on Windows")
+	}
+
+	normalizedAction := strings.ToLower(strings.TrimSpace(action))
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return "", errors.New("service name must not be empty")
+	}
+
+	escapedName := strings.ReplaceAll(trimmedName, "'", "''")
+	var command string
+	var actionMessage string
+	switch normalizedAction {
+	case "start":
+		command = fmt.Sprintf("Start-Service -Name '%s' -ErrorAction Stop", escapedName)
+		actionMessage = "started"
+	case "stop":
+		command = fmt.Sprintf("Stop-Service -Name '%s' -Force -ErrorAction Stop", escapedName)
+		actionMessage = "stopped"
+	case "restart":
+		command = fmt.Sprintf("Restart-Service -Name '%s' -Force -ErrorAction Stop", escapedName)
+		actionMessage = "restarted"
+	default:
+		return "", fmt.Errorf("unsupported service action: %s", action)
+	}
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command)
+	if _, err := runWithOutputTimeout(cmd, adminCommandTimeout); err != nil {
+		return "", err
+	}
+
+	return clampResultMessage(fmt.Sprintf("Service %s %s", trimmedName, actionMessage)), nil
+}
+
+func readFileText(path string, maxBytes int) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	file, err := os.Open(trimmedPath)
+	if err != nil {
+		return "", fmt.Errorf("open file: %w", err)
+	}
+	defer file.Close()
+
+	reader := io.LimitReader(file, int64(maxBytes)+1)
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+
+	truncated := false
+	if len(content) > maxBytes {
+		content = content[:maxBytes]
+		truncated = true
+	}
+
+	message := fmt.Sprintf("%s\n%s", trimmedPath, string(content))
+	if truncated {
+		message += "\n...(truncated)"
+	}
+
+	return clampResultMessage(message), nil
+}
+
+func writeFileText(path string, text string, appendMode bool) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	if len(text) > maxAdminFileWriteBytes {
+		return "", fmt.Errorf("text too long (max %d bytes)", maxAdminFileWriteBytes)
+	}
+
+	dir := filepath.Dir(trimmedPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("create parent dir: %w", err)
+		}
+	}
+
+	flags := os.O_CREATE | os.O_WRONLY
+	if appendMode {
+		flags |= os.O_APPEND
+	} else {
+		flags |= os.O_TRUNC
+	}
+
+	file, err := os.OpenFile(trimmedPath, flags, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("open file for write: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(text); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
+	}
+
+	if appendMode {
+		return clampResultMessage(fmt.Sprintf("Appended %d bytes to %s", len(text), trimmedPath)), nil
+	}
+
+	return clampResultMessage(fmt.Sprintf("Wrote %d bytes to %s", len(text), trimmedPath)), nil
+}
+
+func deletePath(path string) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	if _, err := os.Stat(trimmedPath); err != nil {
+		return "", fmt.Errorf("stat path: %w", err)
+	}
+
+	if err := os.RemoveAll(trimmedPath); err != nil {
+		return "", fmt.Errorf("remove path: %w", err)
+	}
+
+	return clampResultMessage(fmt.Sprintf("Deleted %s", trimmedPath)), nil
+}
+
+func listPath(path string) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	entries, err := os.ReadDir(trimmedPath)
+	if err != nil {
+		return "", fmt.Errorf("list path: %w", err)
+	}
+
+	sort.Slice(entries, func(i int, j int) bool {
+		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
+	})
+
+	lines := []string{trimmedPath}
+	limit := len(entries)
+	truncated := false
+	if limit > maxAdminListEntries {
+		limit = maxAdminListEntries
+		truncated = true
+	}
+
+	for idx := 0; idx < limit; idx++ {
+		entry := entries[idx]
+		entryType := "file"
+		sizeLabel := ""
+		if entry.IsDir() {
+			entryType = "dir"
+		} else if info, infoErr := entry.Info(); infoErr == nil {
+			sizeLabel = fmt.Sprintf(" (%d bytes)", info.Size())
+		}
+
+		lines = append(lines, fmt.Sprintf("[%s] %s%s", entryType, entry.Name(), sizeLabel))
+	}
+
+	if truncated {
+		lines = append(lines, "...(truncated)")
+	}
+
+	return clampResultMessage(strings.Join(lines, "\n")), nil
+}
+
+func makeDir(path string) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	if err := os.MkdirAll(trimmedPath, 0o700); err != nil {
+		return "", fmt.Errorf("create directory: %w", err)
+	}
+
+	return clampResultMessage(fmt.Sprintf("Ensured directory %s", trimmedPath)), nil
+}
+
+func collectSystemInfo() (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("SYSTEM_INFO is supported only on Windows")
+	}
+
+	script := `
+$os = Get-CimInstance Win32_OperatingSystem
+$cs = Get-CimInstance Win32_ComputerSystem
+$boot = $os.LastBootUpTime
+$memGb = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
+"host=$($env:COMPUTERNAME)"
+"user=$($env:USERNAME)"
+"os=$($os.Caption) $($os.Version)"
+"build=$($os.BuildNumber)"
+"uptime_since=$boot"
+"ram_gb=$memGb"
+"domain=$($cs.Domain)"
+`
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func clampResultMessage(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		trimmed = "Command completed with no output"
+	}
+
+	runes := []rune(trimmed)
+	if len(runes) <= maxAdminResultLength {
+		return trimmed
+	}
+
+	const suffix = "...(truncated)"
+	suffixRunes := []rune(suffix)
+	headLen := maxAdminResultLength - len(suffixRunes)
+	if headLen < 1 {
+		return string(suffixRunes[:maxAdminResultLength])
+	}
+
+	return string(runes[:headLen]) + suffix
+}
+
+func runWithOutputTimeout(cmd *exec.Cmd, timeout time.Duration) (string, error) {
+	configureHiddenProcess(cmd)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		outText := clampResultMessage(output.String())
+		if err != nil {
+			if strings.TrimSpace(outText) != "" && outText != "Command completed with no output" {
+				return "", fmt.Errorf("%v | output: %s", err, outText)
+			}
+
+			return "", err
+		}
+
+		return outText, nil
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		return "", errors.New("command timed out")
+	}
+}
+
+func runWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {
+	configureHiddenProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		return errors.New("command timed out")
+	}
+}

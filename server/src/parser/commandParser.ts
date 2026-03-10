@@ -3,6 +3,8 @@ import type { CommandType, ParseError, ParsedExternalCommand, TypedCommand } fro
 const MAX_NOTIFY_TEXT_LENGTH = 180;
 const MAX_CLIPBOARD_TEXT_LENGTH = 1000;
 const MAX_REPEAT_STEPS = 20;
+const MAX_ADMIN_INPUT_LENGTH = 4000;
+const MAX_ADMIN_FILE_TEXT_LENGTH = 128 * 1024;
 const PUNCTUATION_EDGE_RE = /^[,.;:!?'"`]+|[,.;:!?'"`]+$/g;
 const PUNCTUATION_LEADING_RE = /^[,.;:!?'"`]+/;
 const PUNCTUATION_TRAILING_RE = /[,.;:!?'"`]+$/;
@@ -396,8 +398,234 @@ function parseEmergencyLockdown(commandPhrase: string): TypedCommand | ParseErro
   return null;
 }
 
-function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
-  const normalizedPhrase = normalizeCommandPhrase(commandPhrase);
+function parseAdminCommand(rawCommandPhrase: string): TypedCommand | ParseError | null {
+  const trimmed = rawCommandPhrase.trim();
+  const adminPrefix = trimmed.match(/^admin\b/i);
+  if (!adminPrefix) {
+    return null;
+  }
+
+  const adminBody = trimmed.slice(adminPrefix[0].length).trim();
+  if (!adminBody) {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: "admin command requires an action",
+    };
+  }
+
+  const systemInfoMatch = adminBody.match(/^system\s+info$/i);
+  if (systemInfoMatch) {
+    return buildNoArgCommand("SYSTEM_INFO");
+  }
+
+  const cmdMatch = adminBody.match(/^cmd\s+(.+)$/i);
+  if (cmdMatch) {
+    const command = cmdMatch[1]?.trim() ?? "";
+    if (!command) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin cmd requires command text",
+      };
+    }
+
+    if (command.length > MAX_ADMIN_INPUT_LENGTH) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `admin cmd text too long (max ${MAX_ADMIN_INPUT_LENGTH})`,
+      };
+    }
+
+    return {
+      type: "ADMIN_EXEC_CMD",
+      args: { command },
+    };
+  }
+
+  const psMatch = adminBody.match(/^(?:ps|powershell)\s+(.+)$/i);
+  if (psMatch) {
+    const script = psMatch[1]?.trim() ?? "";
+    if (!script) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin ps requires script text",
+      };
+    }
+
+    if (script.length > MAX_ADMIN_INPUT_LENGTH) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `admin ps script too long (max ${MAX_ADMIN_INPUT_LENGTH})`,
+      };
+    }
+
+    return {
+      type: "ADMIN_EXEC_POWERSHELL",
+      args: { script },
+    };
+  }
+
+  const processListMatch = adminBody.match(/^process\s+list(?:\s+(.+))?$/i);
+  if (processListMatch) {
+    const filter = processListMatch[1]?.trim() ?? "";
+    return {
+      type: "PROCESS_LIST",
+      args: filter ? { filter } : {},
+    };
+  }
+
+  const processKillMatch = adminBody.match(/^process\s+kill\s+(.+)$/i);
+  if (processKillMatch) {
+    const target = processKillMatch[1]?.trim() ?? "";
+    if (!target) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin process kill requires a process id or name",
+      };
+    }
+
+    return {
+      type: "PROCESS_KILL",
+      args: { target, force: true },
+    };
+  }
+
+  const serviceListMatch = adminBody.match(/^service\s+list(?:\s+(.+))?$/i);
+  if (serviceListMatch) {
+    const filter = serviceListMatch[1]?.trim() ?? "";
+    return {
+      type: "SERVICE_LIST",
+      args: filter ? { filter } : {},
+    };
+  }
+
+  const serviceControlMatch = adminBody.match(/^service\s+(start|stop|restart)\s+(.+)$/i);
+  if (serviceControlMatch) {
+    const action = (serviceControlMatch[1] ?? "").toLowerCase();
+    const name = serviceControlMatch[2]?.trim() ?? "";
+    if (!name) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin service requires a service name",
+      };
+    }
+
+    return {
+      type: "SERVICE_CONTROL",
+      args: { action, name },
+    };
+  }
+
+  const fileReadMatch = adminBody.match(/^file\s+read\s+(.+)$/i);
+  if (fileReadMatch) {
+    const path = fileReadMatch[1]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file read requires a path",
+      };
+    }
+
+    return {
+      type: "FILE_READ",
+      args: { path },
+    };
+  }
+
+  const fileListMatch = adminBody.match(/^file\s+list\s+(.+)$/i);
+  if (fileListMatch) {
+    const path = fileListMatch[1]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file list requires a path",
+      };
+    }
+
+    return {
+      type: "FILE_LIST",
+      args: { path },
+    };
+  }
+
+  const fileDeleteMatch = adminBody.match(/^file\s+delete\s+(.+)$/i);
+  if (fileDeleteMatch) {
+    const path = fileDeleteMatch[1]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file delete requires a path",
+      };
+    }
+
+    return {
+      type: "FILE_DELETE",
+      args: { path },
+    };
+  }
+
+  const fileMkdirMatch = adminBody.match(/^file\s+mkdir\s+(.+)$/i);
+  if (fileMkdirMatch) {
+    const path = fileMkdirMatch[1]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file mkdir requires a path",
+      };
+    }
+
+    return {
+      type: "FILE_MKDIR",
+      args: { path },
+    };
+  }
+
+  const fileWriteMatch = adminBody.match(/^file\s+(write|append)\s+(.+?)\s+::\s*([\s\S]+)$/i);
+  if (fileWriteMatch) {
+    const action = (fileWriteMatch[1] ?? "").toLowerCase();
+    const path = fileWriteMatch[2]?.trim() ?? "";
+    const text = fileWriteMatch[3] ?? "";
+
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file write/append requires a path",
+      };
+    }
+
+    if (!text) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file write/append requires text after ::",
+      };
+    }
+
+    if (text.length > MAX_ADMIN_FILE_TEXT_LENGTH) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `admin file text too long (max ${MAX_ADMIN_FILE_TEXT_LENGTH})`,
+      };
+    }
+
+    return {
+      type: action === "append" ? "FILE_APPEND" : "FILE_WRITE",
+      args: { path, text },
+    };
+  }
+
+  return {
+    code: "UNKNOWN_COMMAND",
+    message:
+      "Unknown admin command. Use: admin cmd|ps|process list|process kill|service list|service start|service stop|service restart|file read|file list|file write <path> :: <text>|file append <path> :: <text>|file delete|file mkdir|system info",
+  };
+}
+
+function parseCommandPhrase(rawCommandPhrase: string, normalizedCommandPhrase: string): TypedCommand | ParseError {
+  const normalizedPhrase = normalizeCommandPhrase(normalizedCommandPhrase);
+
+  const adminCommand = parseAdminCommand(rawCommandPhrase);
+  if (adminCommand) {
+    return adminCommand;
+  }
 
   const repeatCommand =
     parseRepeatSteps(normalizedPhrase, VOLUME_UP_PREFIXES, "VOLUME_UP") ??
@@ -428,7 +656,7 @@ function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
     return notifyCommand;
   }
 
-  const clipboardCommand = parseClipboard(commandPhrase);
+  const clipboardCommand = parseClipboard(normalizedCommandPhrase);
   if (clipboardCommand) {
     return clipboardCommand;
   }
@@ -440,6 +668,7 @@ function parseCommandPhrase(commandPhrase: string): TypedCommand | ParseError {
 }
 
 export function parseExternalCommand(text: string): ParsedExternalCommand | ParseError {
+  const trimmedRawText = text.trim();
   const normalizedText = normalized(text);
 
   if (!normalizedText) {
@@ -459,15 +688,18 @@ export function parseExternalCommand(text: string): ParsedExternalCommand | Pars
     };
   }
 
-  const commandPhrase = parts.slice(1).join(" ").trim();
-  if (!commandPhrase) {
+  const normalizedCommandPhrase = parts.slice(1).join(" ").trim();
+  if (!normalizedCommandPhrase) {
     return {
       code: "UNKNOWN_COMMAND",
       message: "Missing command after target",
     };
   }
 
-  const parsedCommand = parseCommandPhrase(commandPhrase);
+  const firstSpaceIndex = trimmedRawText.search(/\s/);
+  const rawCommandPhrase = firstSpaceIndex >= 0 ? trimmedRawText.slice(firstSpaceIndex + 1).trim() : "";
+
+  const parsedCommand = parseCommandPhrase(rawCommandPhrase, normalizedCommandPhrase);
   if ("code" in parsedCommand) {
     return parsedCommand;
   }

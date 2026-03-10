@@ -49,10 +49,25 @@ interface UpdateRequestBody {
   size_bytes?: unknown;
 }
 
-const MAX_TEXT_LEN = 280;
+const MAX_TEXT_LEN = 4096;
 const MAX_SOURCE_LEN = 40;
 const MAX_UPDATE_VERSION_LEN = 64;
 const MAX_CAPABILITIES = 50;
+const ADMIN_ONLY_COMMANDS = new Set([
+  "ADMIN_EXEC_CMD",
+  "ADMIN_EXEC_POWERSHELL",
+  "PROCESS_LIST",
+  "PROCESS_KILL",
+  "SERVICE_LIST",
+  "SERVICE_CONTROL",
+  "FILE_READ",
+  "FILE_WRITE",
+  "FILE_APPEND",
+  "FILE_DELETE",
+  "FILE_LIST",
+  "FILE_MKDIR",
+  "SYSTEM_INFO",
+]);
 
 function makeLogId(requestId: string, deviceId: string): string {
   return `${requestId}:${deviceId}`;
@@ -118,6 +133,10 @@ function normalizeSource(candidate: unknown): string {
 }
 
 function requiredCapabilityForCommand(type: string): string | null {
+  if (ADMIN_ONLY_COMMANDS.has(type)) {
+    return "admin_ops";
+  }
+
   if (type === "EMERGENCY_LOCKDOWN") {
     return "emergency_lockdown";
   }

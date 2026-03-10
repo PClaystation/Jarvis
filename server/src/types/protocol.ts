@@ -18,6 +18,19 @@ export type CommandType =
   | "SYSTEM_SHUTDOWN"
   | "SYSTEM_RESTART"
   | "EMERGENCY_LOCKDOWN"
+  | "ADMIN_EXEC_CMD"
+  | "ADMIN_EXEC_POWERSHELL"
+  | "PROCESS_LIST"
+  | "PROCESS_KILL"
+  | "SERVICE_LIST"
+  | "SERVICE_CONTROL"
+  | "FILE_READ"
+  | "FILE_WRITE"
+  | "FILE_APPEND"
+  | "FILE_DELETE"
+  | "FILE_LIST"
+  | "FILE_MKDIR"
+  | "SYSTEM_INFO"
   | "AGENT_UPDATE";
 
 export interface TypedCommand {
