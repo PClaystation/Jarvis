@@ -573,7 +573,7 @@ func installAndRelaunchIfNeeded(executablePath string, args []string, foreground
 	}
 
 	relaunchPathArgs := relaunchArgs(args)
-	if err := background.RelaunchDetached(installedPath, relaunchPathArgs); err != nil {
+	if err := background.RelaunchAfterParentExit(installedPath, relaunchPathArgs); err != nil {
 		return false, fmt.Errorf("launch installed agent: %w", err)
 	}
 
