@@ -6,16 +6,16 @@ import UIKit
 @MainActor
 final class RemoteViewModel: ObservableObject {
   private enum DefaultsKey {
-    static let apiBase = "jarvis.ios.apiBase"
-    static let token = "jarvis.ios.phoneToken"
-    static let target = "jarvis.ios.target"
-    static let updateTarget = "jarvis.ios.updateTarget"
-    static let updateVersion = "jarvis.ios.updateVersion"
-    static let updateURL = "jarvis.ios.updateURL"
-    static let updateSha = "jarvis.ios.updateSha"
-    static let updateSize = "jarvis.ios.updateSize"
-    static let lastSuccess = "jarvis.ios.lastSuccess"
-    static let lastAction = "jarvis.ios.lastAction"
+    static let apiBase = "cordyceps.ios.apiBase"
+    static let token = "cordyceps.ios.phoneToken"
+    static let target = "cordyceps.ios.target"
+    static let updateTarget = "cordyceps.ios.updateTarget"
+    static let updateVersion = "cordyceps.ios.updateVersion"
+    static let updateURL = "cordyceps.ios.updateURL"
+    static let updateSha = "cordyceps.ios.updateSha"
+    static let updateSize = "cordyceps.ios.updateSize"
+    static let lastSuccess = "cordyceps.ios.lastSuccess"
+    static let lastAction = "cordyceps.ios.lastAction"
   }
 
   private static let pollIntervalNs: UInt64 = 30_000_000_000
@@ -280,8 +280,8 @@ final class RemoteViewModel: ObservableObject {
     defer { isLoadingDevices = false }
 
     do {
-      let config = try JarvisClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
-      let response = try await JarvisClient.loadDevices(config: config)
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.loadDevices(config: config)
       let sorted = response.body.devices.sorted { lhs, rhs in
         if lhs.isOnline != rhs.isOnline {
           return lhs.isOnline && !rhs.isOnline
@@ -318,8 +318,8 @@ final class RemoteViewModel: ObservableObject {
     setStatus("Testing token...", isError: false)
 
     do {
-      let config = try JarvisClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
-      let response = try await JarvisClient.loadDevices(config: config)
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.loadDevices(config: config)
       let sorted = response.body.devices.sorted { lhs, rhs in
         if lhs.isOnline != rhs.isOnline {
           return lhs.isOnline && !rhs.isOnline
@@ -359,8 +359,8 @@ final class RemoteViewModel: ObservableObject {
     defer { isSendingCommand = false }
 
     do {
-      let config = try JarvisClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
-      let response = try await JarvisClient.sendCommand(config: config, text: text)
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.sendCommand(config: config, text: text)
       connectionState = .connected
 
       let isError = response.body.ok == false
@@ -442,8 +442,8 @@ final class RemoteViewModel: ObservableObject {
     defer { isPushingUpdate = false }
 
     do {
-      let config = try JarvisClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
-      let response = try await JarvisClient.pushUpdate(
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.pushUpdate(
         config: config,
         target: target,
         version: version,
@@ -784,7 +784,7 @@ final class RemoteViewModel: ObservableObject {
     if let hashIndex = raw.firstIndex(of: "#") {
       let fragment = String(raw[raw.index(after: hashIndex)...])
       if !fragment.isEmpty,
-         let hashComponents = URLComponents(string: "https://jarvis.invalid/?\(fragment)"),
+         let hashComponents = URLComponents(string: "https://cordyceps.invalid/?\(fragment)"),
          let items = hashComponents.queryItems
       {
         for item in items {
@@ -815,7 +815,7 @@ final class RemoteViewModel: ObservableObject {
     guard let date = ISO8601DateFormatter().date(from: isoString) else {
       return "never"
     }
-    return DateFormatter.jarvis.string(from: date)
+    return DateFormatter.cordyceps.string(from: date)
   }
 
   private func setStatus(_ text: String, isError: Bool) {
@@ -842,7 +842,7 @@ final class RemoteViewModel: ObservableObject {
     let message: String
     var shouldDisconnect = false
 
-    if let clientError = error as? JarvisClientError {
+    if let clientError = error as? CordycepsClientError {
       switch clientError {
       case .missingToken:
         shouldDisconnect = true
@@ -916,7 +916,7 @@ private final class SpeechController {
     onError: @escaping (_ message: String) -> Void
   ) throws {
     guard let recognizer, recognizer.isAvailable else {
-      throw NSError(domain: "JarvisSpeech", code: 1, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer is unavailable."])
+      throw NSError(domain: "CordycepsSpeech", code: 1, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer is unavailable."])
     }
 
     stop()

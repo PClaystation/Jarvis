@@ -32,78 +32,52 @@ const updateShaInput = document.getElementById("updateShaInput");
 const updateSizeInput = document.getElementById("updateSizeInput");
 const pushUpdateBtn = document.getElementById("pushUpdateBtn");
 
-const TOKEN_KEY = "jarvis_phone_api_token";
-const TARGET_KEY = "jarvis_last_target";
-const API_BASE_KEY = "jarvis_api_base_url";
-const UPDATE_TARGET_KEY = "jarvis_update_target";
-const UPDATE_VERSION_KEY = "jarvis_update_version";
-const UPDATE_URL_KEY = "jarvis_update_url";
-const UPDATE_SHA_KEY = "jarvis_update_sha";
-const UPDATE_SIZE_KEY = "jarvis_update_size";
-const LAST_COMMAND_SUCCESS_KEY = "jarvis_last_command_success";
-const BOOTSTRAP_COMMAND_KEY = "jarvis_bootstrap_command";
-const BOOTSTRAP_ACTION_KEY = "jarvis_bootstrap_action";
-const BOOTSTRAP_ARG_KEY = "jarvis_bootstrap_arg";
-const LAST_ACTION_KEY = "jarvis_last_action";
+const TOKEN_KEY = "cordyceps_phone_api_token";
+const TARGET_KEY = "cordyceps_last_target";
+const API_BASE_KEY = "cordyceps_api_base_url";
+const UPDATE_TARGET_KEY = "cordyceps_update_target";
+const UPDATE_VERSION_KEY = "cordyceps_update_version";
+const UPDATE_URL_KEY = "cordyceps_update_url";
+const UPDATE_SHA_KEY = "cordyceps_update_sha";
+const UPDATE_SIZE_KEY = "cordyceps_update_size";
+const LAST_COMMAND_SUCCESS_KEY = "cordyceps_last_command_success";
+const BOOTSTRAP_COMMAND_KEY = "cordyceps_bootstrap_command";
+const BOOTSTRAP_ACTION_KEY = "cordyceps_bootstrap_action";
+const BOOTSTRAP_ARG_KEY = "cordyceps_bootstrap_arg";
+const LAST_ACTION_KEY = "cordyceps_last_action";
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
 const POLL_INTERVAL_MS = 30000;
 
 const COMMAND_LIBRARY = [
   { value: "ping", label: "ping", category: "Connectivity", keywords: ["status", "health", "check"] },
-  { value: "status", label: "status", category: "Connectivity", keywords: ["ping", "health", "check"] },
   { value: "play", label: "play", category: "Media", keywords: ["resume"] },
-  { value: "resume", label: "resume", category: "Media", keywords: ["play"] },
   { value: "pause", label: "pause", category: "Media", keywords: ["stop"] },
   { value: "play pause", label: "play pause", category: "Media", keywords: ["toggle"] },
-  { value: "toggle", label: "toggle", category: "Media", keywords: ["play", "pause"] },
-  { value: "next", label: "next", category: "Media", keywords: ["skip", "track", "repeat"] },
-  { value: "next track", label: "next track", category: "Media", keywords: ["skip", "next", "repeat"] },
-  { value: "skip", label: "skip", category: "Media", keywords: ["next", "track", "repeat"] },
-  { value: "skip track", label: "skip track", category: "Media", keywords: ["next", "skip", "repeat"] },
-  { value: "previous", label: "previous", category: "Media", keywords: ["back", "track", "repeat"] },
-  { value: "previous track", label: "previous track", category: "Media", keywords: ["back", "prev", "repeat"] },
-  { value: "prev", label: "prev", category: "Media", keywords: ["previous", "back", "repeat"] },
-  { value: "back", label: "back", category: "Media", keywords: ["previous", "track", "repeat"] },
-  { value: "volume up", label: "volume up", category: "Volume", keywords: ["louder", "vol up", "repeat"] },
-  { value: "vol up", label: "vol up", category: "Volume", keywords: ["volume up", "louder", "repeat"] },
-  { value: "louder", label: "louder", category: "Volume", keywords: ["volume up", "repeat"] },
-  { value: "volume higher", label: "volume higher", category: "Volume", keywords: ["volume up", "repeat"] },
-  { value: "volume down", label: "volume down", category: "Volume", keywords: ["quieter", "vol down", "repeat"] },
-  { value: "vol down", label: "vol down", category: "Volume", keywords: ["volume down", "quieter", "repeat"] },
-  { value: "quieter", label: "quieter", category: "Volume", keywords: ["volume down", "repeat"] },
-  { value: "volume lower", label: "volume lower", category: "Volume", keywords: ["volume down", "repeat"] },
-  { value: "mute", label: "mute", category: "Volume", keywords: ["mute volume", "silence"] },
-  { value: "mute volume", label: "mute volume", category: "Volume", keywords: ["mute", "silence"] },
+  { value: "next", label: "next", category: "Media", keywords: ["skip", "next track", "repeat"] },
+  { value: "previous", label: "previous", category: "Media", keywords: ["back", "prev", "previous track", "repeat"] },
+  { value: "volume up", label: "volume up", category: "Volume", keywords: ["louder", "vol up", "volume higher", "repeat"] },
+  { value: "volume down", label: "volume down", category: "Volume", keywords: ["quieter", "vol down", "volume lower", "repeat"] },
+  { value: "mute", label: "mute", category: "Volume", keywords: ["mute volume", "silence", "unmute"] },
   { value: "open spotify", label: "open spotify", category: "Apps", keywords: ["launch spotify"] },
   { value: "open discord", label: "open discord", category: "Apps", keywords: ["launch discord"] },
   { value: "open chrome", label: "open chrome", category: "Apps", keywords: ["browser"] },
   { value: "open steam", label: "open steam", category: "Apps", keywords: ["games"] },
-  { value: "open explorer", label: "open explorer", category: "Apps", keywords: ["files", "windows explorer"] },
-  { value: "open file explorer", label: "open file explorer", category: "Apps", keywords: ["explorer", "files"] },
-  { value: "open vscode", label: "open vscode", category: "Apps", keywords: ["editor", "code"] },
-  { value: "open vs code", label: "open vs code", category: "Apps", keywords: ["vscode", "editor"] },
-  { value: "open visual studio code", label: "open visual studio code", category: "Apps", keywords: ["vscode", "editor"] },
-  { value: "open edge", label: "open edge", category: "Apps", keywords: ["browser", "microsoft edge"] },
-  { value: "open microsoft edge", label: "open microsoft edge", category: "Apps", keywords: ["edge", "browser"] },
+  { value: "open explorer", label: "open explorer", category: "Apps", keywords: ["file explorer", "windows explorer", "files"] },
+  { value: "open vscode", label: "open vscode", category: "Apps", keywords: ["vs code", "visual studio code", "editor", "code"] },
+  { value: "open edge", label: "open edge", category: "Apps", keywords: ["microsoft edge", "browser"] },
   { value: "open firefox", label: "open firefox", category: "Apps", keywords: ["browser"] },
   { value: "open notepad", label: "open notepad", category: "Apps", keywords: ["text"] },
   { value: "open calculator", label: "open calculator", category: "Apps", keywords: ["calc"] },
-  { value: "open calc", label: "open calc", category: "Apps", keywords: ["calculator"] },
   { value: "open settings", label: "open settings", category: "Apps", keywords: ["windows settings"] },
   { value: "open slack", label: "open slack", category: "Apps", keywords: ["chat"] },
   { value: "open teams", label: "open teams", category: "Apps", keywords: ["meeting", "chat"] },
   { value: "open task manager", label: "open task manager", category: "Apps", keywords: ["taskmanager", "process"] },
-  { value: "open taskmanager", label: "open taskmanager", category: "Apps", keywords: ["task manager", "process"] },
   { value: "open terminal", label: "open terminal", category: "Apps", keywords: ["windows terminal", "wt"] },
-  { value: "open windows terminal", label: "open windows terminal", category: "Apps", keywords: ["terminal", "wt"] },
-  { value: "open powershell", label: "open powershell", category: "Apps", keywords: ["shell"] },
-  { value: "open power shell", label: "open power shell", category: "Apps", keywords: ["powershell", "shell"] },
+  { value: "open powershell", label: "open powershell", category: "Apps", keywords: ["power shell", "shell"] },
   { value: "open cmd", label: "open cmd", category: "Apps", keywords: ["command prompt"] },
-  { value: "open command prompt", label: "open command prompt", category: "Apps", keywords: ["cmd"] },
   { value: "open control panel", label: "open control panel", category: "Apps", keywords: ["controlpanel"] },
   { value: "open paint", label: "open paint", category: "Apps", keywords: ["mspaint"] },
-  { value: "open mspaint", label: "open mspaint", category: "Apps", keywords: ["paint"] },
   { value: "open snipping tool", label: "open snipping tool", category: "Apps", keywords: ["snippingtool", "screenshot"] },
   { value: "lock", label: "lock", category: "Power", keywords: ["lock pc"] },
   { value: "lock pc", label: "lock pc", category: "Power", keywords: ["lock"] },
@@ -116,11 +90,7 @@ const COMMAND_LIBRARY = [
   { value: "log out", label: "log out", category: "Power", keywords: ["sign out", "logout"] },
   { value: "logout", label: "logout", category: "Power", keywords: ["sign out", "log out"] },
   { value: "shutdown", label: "shutdown", category: "Power", keywords: ["shut down", "shutdown pc"] },
-  { value: "shut down", label: "shut down", category: "Power", keywords: ["shutdown"] },
-  { value: "shutdown pc", label: "shutdown pc", category: "Power", keywords: ["shutdown"] },
   { value: "restart", label: "restart", category: "Power", keywords: ["reboot", "restart pc"] },
-  { value: "reboot", label: "reboot", category: "Power", keywords: ["restart"] },
-  { value: "restart pc", label: "restart pc", category: "Power", keywords: ["restart"] },
   { value: "notify", label: "notify (requires message)", category: "Messaging", keywords: ["alert", "notification"] },
   { value: "clipboard", label: "clipboard (requires text)", category: "Messaging", keywords: ["copy", "copy text"] },
   { value: "copy", label: "copy (requires text)", category: "Messaging", keywords: ["clipboard", "copy text"] },
@@ -137,23 +107,45 @@ const COMMAND_LIBRARY_INDEX = COMMAND_LIBRARY.map((entry) => {
 });
 
 const KNOWN_ACTION_VALUES = new Set(COMMAND_LIBRARY_INDEX.map((entry) => entry.value));
+const ACTION_VALUE_ALIASES = new Map([
+  ["status", "ping"],
+  ["resume", "play"],
+  ["toggle", "play pause"],
+  ["next track", "next"],
+  ["skip", "next"],
+  ["skip track", "next"],
+  ["previous track", "previous"],
+  ["prev", "previous"],
+  ["back", "previous"],
+  ["vol up", "volume up"],
+  ["louder", "volume up"],
+  ["volume higher", "volume up"],
+  ["vol down", "volume down"],
+  ["quieter", "volume down"],
+  ["volume lower", "volume down"],
+  ["mute volume", "mute"],
+  ["open file explorer", "open explorer"],
+  ["open vs code", "open vscode"],
+  ["open visual studio code", "open vscode"],
+  ["open microsoft edge", "open edge"],
+  ["open calc", "open calculator"],
+  ["open taskmanager", "open task manager"],
+  ["open windows terminal", "open terminal"],
+  ["open power shell", "open powershell"],
+  ["open command prompt", "open cmd"],
+  ["open mspaint", "open paint"],
+  ["lock pc", "lock"],
+  ["sleep pc", "sleep"],
+  ["shut down", "shutdown"],
+  ["shutdown pc", "shutdown"],
+  ["reboot", "restart"],
+  ["restart pc", "restart"],
+]);
 const REPEATABLE_ACTIONS = new Set([
   "volume up",
-  "vol up",
-  "louder",
-  "volume higher",
   "volume down",
-  "vol down",
-  "quieter",
-  "volume lower",
-  "next track",
-  "skip track",
   "next",
-  "skip",
-  "previous track",
   "previous",
-  "prev",
-  "back",
 ]);
 const dangerousActions = new Set(["shutdown", "shut down", "shutdown pc", "restart", "reboot", "restart pc", "sleep", "sleep pc", "sign out", "log out", "logout"]);
 
@@ -514,12 +506,13 @@ function renderActionOptions(query = "") {
 
 function setSelectedAction(action) {
   const normalized = normalizeActionText(action);
-  if (!normalized || !KNOWN_ACTION_VALUES.has(normalized)) {
+  const canonical = ACTION_VALUE_ALIASES.get(normalized) || normalized;
+  if (!canonical || !KNOWN_ACTION_VALUES.has(canonical)) {
     return false;
   }
 
-  actionSelect.value = normalized;
-  localStorage.setItem(LAST_ACTION_KEY, normalized);
+  actionSelect.value = canonical;
+  localStorage.setItem(LAST_ACTION_KEY, canonical);
   return true;
 }
 

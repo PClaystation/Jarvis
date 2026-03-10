@@ -34,5 +34,5 @@ if ($needsInstall) {
   New-Item -Path $stampFile -ItemType File -Force | Out-Null
 }
 
-Write-Host "Starting Jarvis server..."
+Write-Host "Starting Cordyceps server..."
 npm run dev

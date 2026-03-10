@@ -6,7 +6,7 @@ const DEFAULT_CORS_ALLOWED_ORIGINS = [
   "https://pclaystation.github.io",
   "https://mpmc.ddns.net",
 ].join(",");
-const DEFAULT_PWA_PUBLIC_URL = "https://pclaystation.github.io/Jarvis/";
+const DEFAULT_PWA_PUBLIC_URL = "https://pclaystation.github.io/Cordyceps/";
 
 const PHONE_PLACEHOLDER = "change-me-phone-token";
 const BOOTSTRAP_PLACEHOLDER = "change-me-bootstrap-token";
@@ -197,7 +197,7 @@ export interface AppConfig {
 export function loadConfig(): AppConfig {
   const host = process.env.HOST ?? "0.0.0.0";
   const port = readInt("PORT", 8080);
-  const sqlitePath = process.env.SQLITE_PATH ?? path.join(process.cwd(), "data", "jarvis.db");
+  const sqlitePath = process.env.SQLITE_PATH ?? path.join(process.cwd(), "data", "cordyceps.db");
   const secrets = resolveSecrets(sqlitePath);
   const commandTimeoutMs = readInt("COMMAND_TIMEOUT_MS", 5000);
   const maxPendingCommands = readInt("MAX_PENDING_COMMANDS", 1000);

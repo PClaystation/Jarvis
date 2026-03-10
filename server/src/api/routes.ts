@@ -302,7 +302,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
     return {
       ok: true,
-      service: "jarvis-server",
+      service: "cordyceps-server",
       ts: new Date().toISOString(),
       uptime_seconds: Math.floor(process.uptime()),
       online_connections: deps.registry.countOnline(),

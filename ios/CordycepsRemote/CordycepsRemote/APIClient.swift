@@ -1,6 +1,6 @@
 import Foundation
 
-enum JarvisClientError: LocalizedError {
+enum CordycepsClientError: LocalizedError {
   case missingToken
   case invalidBaseURL
   case invalidResponse
@@ -28,7 +28,7 @@ struct ConnectionConfig {
   let token: String
 }
 
-enum JarvisClient {
+enum CordycepsClient {
   private static let encoder: JSONEncoder = {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.withoutEscapingSlashes]
@@ -40,11 +40,11 @@ enum JarvisClient {
   static func makeConnectionConfig(apiBaseInput: String, tokenInput: String) throws -> ConnectionConfig {
     let token = tokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
     if token.isEmpty {
-      throw JarvisClientError.missingToken
+      throw CordycepsClientError.missingToken
     }
 
     guard let baseURL = normalizeBaseURL(from: apiBaseInput) else {
-      throw JarvisClientError.invalidBaseURL
+      throw CordycepsClientError.invalidBaseURL
     }
 
     return ConnectionConfig(baseURL: baseURL, token: token)
@@ -67,7 +67,7 @@ enum JarvisClient {
       text: text,
       source: "ios-native",
       sent_at: ISO8601DateFormatter().string(from: Date()),
-      client_version: "jarvis-remote-ios-v2"
+      client_version: "cordyceps-remote-ios-v2"
     )
 
     return try await execute(
@@ -115,7 +115,7 @@ enum JarvisClient {
     responseType: ResponseBody.Type
   ) async throws -> APIResponse<ResponseBody> {
     guard let endpointURL = buildURL(baseURL: config.baseURL, path: path) else {
-      throw JarvisClientError.invalidBaseURL
+      throw CordycepsClientError.invalidBaseURL
     }
 
     var request = URLRequest(url: endpointURL)
@@ -139,18 +139,18 @@ enum JarvisClient {
     }
 
     guard let http = response as? HTTPURLResponse else {
-      throw JarvisClientError.invalidResponse
+      throw CordycepsClientError.invalidResponse
     }
 
     let latencyMs = Date().timeIntervalSince(startTime) * 1000
 
     if !(200 ... 299).contains(http.statusCode) {
       let message = parseErrorMessage(from: data) ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-      throw JarvisClientError.httpError(status: http.statusCode, message: message)
+      throw CordycepsClientError.httpError(status: http.statusCode, message: message)
     }
 
     guard let decoded = try? decoder.decode(responseType, from: data) else {
-      throw JarvisClientError.decodingFailed
+      throw CordycepsClientError.decodingFailed
     }
 
     return APIResponse(

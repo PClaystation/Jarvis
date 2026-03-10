@@ -27,5 +27,5 @@ if [ "$NEEDS_INSTALL" -eq 1 ]; then
   touch "$STAMP_FILE"
 fi
 
-echo "Starting Jarvis server..."
+echo "Starting Cordyceps server..."
 exec npm run dev

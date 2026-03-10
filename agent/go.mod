@@ -1,4 +1,4 @@
-module github.com/charliearnerstal/jarvis/agent
+module github.com/charliearnerstal/cordyceps/agent
 
 go 1.23
 

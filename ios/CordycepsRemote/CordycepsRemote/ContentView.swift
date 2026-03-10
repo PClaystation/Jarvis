@@ -22,7 +22,7 @@ struct ContentView: View {
           .padding(.bottom, 28)
         }
       }
-      .navigationTitle("Jarvis Remote")
+      .navigationTitle("Cordyceps Remote")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .topBarTrailing) {
@@ -84,7 +84,7 @@ struct ContentView: View {
   }
 
   private var heroCard: some View {
-    JarvisCard(
+    CordycepsCard(
       tint: LinearGradient(
         colors: [Color(red: 0.12, green: 0.47, blue: 0.41).opacity(0.38), Color(red: 0.90, green: 0.66, blue: 0.20).opacity(0.28)],
         startPoint: .topLeading,
@@ -115,7 +115,7 @@ struct ContentView: View {
   }
 
   private var connectionCard: some View {
-    JarvisCard {
+    CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
         sectionHeader("Connection")
 
@@ -123,17 +123,17 @@ struct ContentView: View {
           .textInputAutocapitalization(.never)
           .keyboardType(.URL)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
 
         SecureField("PHONE_API_TOKEN", text: $viewModel.tokenInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
 
         TextField("Default target (m1)", text: $viewModel.targetInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.targetInput) { _, _ in
             viewModel.targetDidChange()
           }
@@ -168,7 +168,7 @@ struct ContentView: View {
             .textInputAutocapitalization(.never)
             .keyboardType(.URL)
             .autocorrectionDisabled()
-            .jarvisFieldStyle()
+            .cordycepsFieldStyle()
 
           HStack(spacing: 8) {
             actionButton("Paste", icon: "doc.on.clipboard", role: .normal) {
@@ -188,7 +188,7 @@ struct ContentView: View {
   }
 
   private var devicesCard: some View {
-    JarvisCard {
+    CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
         sectionHeader("Devices")
 
@@ -259,14 +259,14 @@ struct ContentView: View {
   }
 
   private var commandCard: some View {
-    JarvisCard {
+    CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
         sectionHeader("Command")
 
         TextField("Target (m1 or all)", text: $viewModel.targetInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.targetInput) { _, _ in
             viewModel.targetDidChange()
           }
@@ -274,7 +274,7 @@ struct ContentView: View {
         TextField("Search commands, aliases, and apps", text: $viewModel.actionSearchInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.actionSearchInput) { _, _ in
             viewModel.actionSearchDidChange()
           }
@@ -302,7 +302,7 @@ struct ContentView: View {
           TextField(viewModel.selectedActionArgumentPlaceholder, text: $viewModel.argumentInput)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
-            .jarvisFieldStyle()
+            .cordycepsFieldStyle()
             .onChange(of: viewModel.argumentInput) { _, _ in
               viewModel.composeFromInputs()
             }
@@ -337,7 +337,7 @@ struct ContentView: View {
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
           .lineLimit(2 ... 6)
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
 
         HStack(spacing: 8) {
           actionButton("Build", icon: "wand.and.stars", role: .normal) {
@@ -365,7 +365,7 @@ struct ContentView: View {
   }
 
   private var updateCard: some View {
-    JarvisCard {
+    CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
         sectionHeader("Agent Update")
 
@@ -378,31 +378,31 @@ struct ContentView: View {
         TextField("Target (m1 or all)", text: $viewModel.updateTargetInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.updateTargetInput) { _, _ in viewModel.persistUpdateSettings() }
 
         TextField("Version (0.2.0)", text: $viewModel.updateVersionInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.updateVersionInput) { _, _ in viewModel.persistUpdateSettings() }
 
         TextField("Package URL (https://...)", text: $viewModel.updateURLInput)
           .textInputAutocapitalization(.never)
           .keyboardType(.URL)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.updateURLInput) { _, _ in viewModel.persistUpdateSettings() }
 
         TextField("SHA256 (optional 64 hex chars)", text: $viewModel.updateShaInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.updateShaInput) { _, _ in viewModel.persistUpdateSettings() }
 
         TextField("Size bytes (optional)", text: $viewModel.updateSizeInput)
           .keyboardType(.numberPad)
-          .jarvisFieldStyle()
+          .cordycepsFieldStyle()
           .onChange(of: viewModel.updateSizeInput) { _, _ in viewModel.persistUpdateSettings() }
 
         actionButton("Push Update", icon: "arrow.up.circle.fill", role: .warning, loading: viewModel.isPushingUpdate) {
@@ -413,7 +413,7 @@ struct ContentView: View {
   }
 
   private var resultCard: some View {
-    JarvisCard {
+    CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
         sectionHeader("Result")
 
@@ -581,7 +581,7 @@ struct ContentView: View {
   }
 }
 
-private struct JarvisCard<Content: View>: View {
+private struct CordycepsCard<Content: View>: View {
   let tint: LinearGradient?
   @ViewBuilder var content: Content
 
@@ -660,7 +660,7 @@ private enum ButtonRoleStyle {
 }
 
 private extension View {
-  func jarvisFieldStyle() -> some View {
+  func cordycepsFieldStyle() -> some View {
     self
       .font(.system(.footnote, design: .rounded).weight(.medium))
       .padding(.horizontal, 12)

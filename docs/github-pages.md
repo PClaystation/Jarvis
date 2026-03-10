@@ -1,6 +1,6 @@
 # GitHub Pages Setup (PWA Client)
 
-GitHub Pages can host only the client UI. The Jarvis server and agent still run on your own host.
+GitHub Pages can host only the client UI. The Cordyceps server and agent still run on your own host.
 
 ## 1. Server-side CORS
 

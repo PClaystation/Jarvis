@@ -20,7 +20,7 @@ type Config struct {
 }
 
 func DefaultConfigPath() (string, error) {
-	override := strings.TrimSpace(os.Getenv("JARVIS_AGENT_CONFIG"))
+	override := strings.TrimSpace(os.Getenv("CORDYCEPS_AGENT_CONFIG"))
 	if override != "" {
 		return override, nil
 	}
@@ -31,7 +31,7 @@ func DefaultConfigPath() (string, error) {
 			return "", errors.New("APPDATA is not set")
 		}
 
-		return filepath.Join(appData, "JarvisAgent", "config.json"), nil
+		return filepath.Join(appData, "CordycepsAgent", "config.json"), nil
 	}
 
 	homeDir, err := os.UserHomeDir()
@@ -39,7 +39,7 @@ func DefaultConfigPath() (string, error) {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 
-	return filepath.Join(homeDir, ".jarvis-agent", "config.json"), nil
+	return filepath.Join(homeDir, ".cordyceps-agent", "config.json"), nil
 }
 
 func Load(path string) (*Config, error) {

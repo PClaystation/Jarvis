@@ -1,4 +1,4 @@
-# Jarvis Remote Device Control MVP
+# Cordyceps Remote Device Control MVP
 
 Phone-driven remote command system:
 
@@ -167,13 +167,13 @@ Management:
 
 ```bash
 cd agent
-go build -o jarvis-agent.exe ./cmd/agent
+go build -o cordyceps-agent.exe ./cmd/agent
 ```
 
 3. First-run enrollment:
 
 ```powershell
-.\jarvis-agent.exe --server-url "https://your-server.example" --device-id "m1" --bootstrap-token "YOUR_BOOTSTRAP_TOKEN"
+.\cordyceps-agent.exe --server-url "https://your-server.example" --device-id "m1" --bootstrap-token "YOUR_BOOTSTRAP_TOKEN"
 ```
 
 Windows runtime behavior:
@@ -190,7 +190,7 @@ What first run does:
 
 Default config path on Windows:
 
-- `%APPDATA%\JarvisAgent\config.json`
+- `%APPDATA%\CordycepsAgent\config.json`
 
 Optional installer script:
 
@@ -211,11 +211,11 @@ See [docs/iphone-shortcut.md](docs/iphone-shortcut.md).
 
 A native SwiftUI iPhone app is available in:
 
-- `ios/JarvisRemote/`
+- `ios/CordycepsRemote/`
 
-Open `ios/JarvisRemote/JarvisRemote.xcodeproj` in Xcode and follow:
+Open `ios/CordycepsRemote/CordycepsRemote.xcodeproj` in Xcode and follow:
 
-- [ios/JarvisRemote/README.md](ios/JarvisRemote/README.md)
+- [ios/CordycepsRemote/README.md](ios/CordycepsRemote/README.md)
 
 ## PWA Client (Recommended)
 
@@ -275,7 +275,7 @@ Push update (single device):
 curl -X POST http://localhost:8080/api/update \
   -H "Authorization: Bearer YOUR_PHONE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"target":"m1","version":"0.2.0","package_url":"https://mpmc.ddns.net/updates/jarvis-agent-0.2.0.exe"}'
+  -d '{"target":"m1","version":"0.2.0","package_url":"https://mpmc.ddns.net/updates/cordyceps-agent-0.2.0.exe"}'
 ```
 
 Notes:
@@ -286,12 +286,12 @@ Notes:
 ## Remote Update Workflow
 
 1. Install this updater-capable agent build once on each PC (manual one-time step).
-2. Build new `jarvis-agent.exe` and host it at an HTTPS URL reachable by agents.
+2. Build new `cordyceps-agent.exe` and host it at an HTTPS URL reachable by agents.
 3. Open PWA `Agent Update` panel.
 4. Fill:
    - target (`m1` or `all`)
    - version (for example `0.2.0`)
-   - package URL (`https://.../jarvis-agent-0.2.0.exe`)
+   - package URL (`https://.../cordyceps-agent-0.2.0.exe`)
    - optional SHA256 (leave blank to auto-inspect on server)
 5. Tap `Push Update`.
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charliearnerstal/jarvis/agent/internal/protocol"
+	"github.com/charliearnerstal/cordyceps/agent/internal/protocol"
 )
 
 const commandTimeout = 8 * time.Second
@@ -36,6 +36,15 @@ var openAppTargets = map[string]string{
 	"controlpanel": "control",
 	"paint":        "mspaint",
 	"snippingtool": "snippingtool",
+}
+
+var mediaVirtualKeyCodes = map[string]int{
+	"VOLUME_MUTE":      0xAD,
+	"VOLUME_DOWN":      0xAE,
+	"VOLUME_UP":        0xAF,
+	"MEDIA_NEXT_TRACK": 0xB0,
+	"MEDIA_PREV_TRACK": 0xB1,
+	"MEDIA_PLAY_PAUSE": 0xB3,
 }
 
 func Capabilities() []string {
@@ -353,25 +362,48 @@ func openApp(app string) error {
 }
 
 func sendMediaKeyRepeated(key string, steps int) error {
-	for i := 0; i < steps; i++ {
-		if err := sendMediaKey(key); err != nil {
-			return err
-		}
-
-		if i+1 < steps {
-			time.Sleep(120 * time.Millisecond)
-		}
-	}
-
-	return nil
+	return sendMediaKeyTimes(key, steps)
 }
 
 func sendMediaKey(key string) error {
+	return sendMediaKeyTimes(key, 1)
+}
+
+func sendMediaKeyTimes(key string, steps int) error {
 	if runtime.GOOS != "windows" {
 		return errors.New("media keys are supported only on Windows")
 	}
 
-	script := fmt.Sprintf("(New-Object -ComObject WScript.Shell).SendKeys('{%s}')", key)
+	if steps < 1 {
+		return fmt.Errorf("invalid media key step count: %d", steps)
+	}
+
+	normalizedKey := strings.ToUpper(strings.TrimSpace(key))
+	virtualKey, ok := mediaVirtualKeyCodes[normalizedKey]
+	if !ok {
+		return fmt.Errorf("unsupported media key: %s", key)
+	}
+
+	script := fmt.Sprintf(`
+$vk = [byte]%d
+$steps = %d
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class MediaKeySender {
+	[DllImport("user32.dll", SetLastError = true)]
+	public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+for ($i = 0; $i -lt $steps; $i++) {
+	[MediaKeySender]::keybd_event($vk, 0, 0, [UIntPtr]::Zero)
+	Start-Sleep -Milliseconds 20
+	[MediaKeySender]::keybd_event($vk, 0, 2, [UIntPtr]::Zero)
+	if ($i + 1 -lt $steps) {
+		Start-Sleep -Milliseconds 110
+	}
+}
+`, virtualKey, steps)
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 
 	if err := runWithTimeout(cmd, commandTimeout); err != nil {
@@ -444,7 +476,7 @@ func notify(text string) error {
 	}
 
 	escaped := strings.ReplaceAll(text, "'", "''")
-	script := fmt.Sprintf("$w = New-Object -ComObject WScript.Shell; $null = $w.Popup('%s', 3, 'Jarvis', 64)", escaped)
+	script := fmt.Sprintf("$w = New-Object -ComObject WScript.Shell; $null = $w.Popup('%s', 3, 'Cordyceps', 64)", escaped)
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 
 	if err := runWithTimeout(cmd, commandTimeout); err != nil {

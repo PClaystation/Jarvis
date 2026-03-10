@@ -21,9 +21,9 @@
   <key>LSRequiresIPhoneOS</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Jarvis Remote uses the microphone to capture voice commands before sending them to your agents.</string>
+  <string>Cordyceps Remote uses the microphone to capture voice commands before sending them to your agents.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
-  <string>Jarvis Remote uses speech recognition to transcribe spoken commands into command text.</string>
+  <string>Cordyceps Remote uses speech recognition to transcribe spoken commands into command text.</string>
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
   <key>UILaunchScreen</key>

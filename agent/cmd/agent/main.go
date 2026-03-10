@@ -19,13 +19,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/charliearnerstal/jarvis/agent/internal/background"
-	"github.com/charliearnerstal/jarvis/agent/internal/commands"
-	"github.com/charliearnerstal/jarvis/agent/internal/config"
-	"github.com/charliearnerstal/jarvis/agent/internal/instance"
-	"github.com/charliearnerstal/jarvis/agent/internal/protocol"
-	"github.com/charliearnerstal/jarvis/agent/internal/startup"
-	"github.com/charliearnerstal/jarvis/agent/internal/updater"
+	"github.com/charliearnerstal/cordyceps/agent/internal/background"
+	"github.com/charliearnerstal/cordyceps/agent/internal/commands"
+	"github.com/charliearnerstal/cordyceps/agent/internal/config"
+	"github.com/charliearnerstal/cordyceps/agent/internal/instance"
+	"github.com/charliearnerstal/cordyceps/agent/internal/protocol"
+	"github.com/charliearnerstal/cordyceps/agent/internal/startup"
+	"github.com/charliearnerstal/cordyceps/agent/internal/updater"
 	"github.com/gorilla/websocket"
 )
 
@@ -65,9 +65,9 @@ func main() {
 		runAgentFlag       bool
 	)
 
-	flag.StringVar(&serverURLFlag, "server-url", strings.TrimSpace(os.Getenv("JARVIS_SERVER_URL")), "Server base URL (e.g. https://jarvis.example)")
+	flag.StringVar(&serverURLFlag, "server-url", strings.TrimSpace(os.Getenv("CORDYCEPS_SERVER_URL")), "Server base URL (e.g. https://cordyceps.example)")
 	flag.StringVar(&deviceIDFlag, "device-id", "", "Device ID (e.g. m1)")
-	flag.StringVar(&bootstrapTokenFlag, "bootstrap-token", strings.TrimSpace(os.Getenv("JARVIS_BOOTSTRAP_TOKEN")), "Bootstrap token for first-run enrollment")
+	flag.StringVar(&bootstrapTokenFlag, "bootstrap-token", strings.TrimSpace(os.Getenv("CORDYCEPS_BOOTSTRAP_TOKEN")), "Bootstrap token for first-run enrollment")
 	flag.StringVar(&versionFlag, "version", defaultVersion, "Agent version string")
 	flag.StringVar(&configPathFlag, "config", "", "Path to agent config file")
 	flag.BoolVar(&enrollOnlyFlag, "enroll-only", false, "Enroll and exit")
@@ -174,11 +174,11 @@ func main() {
 
 func firstRunEnroll(cfgPath string, serverBaseURL string, deviceIDInput string, bootstrapToken string, version string) (*config.Config, error) {
 	if serverBaseURL == "" {
-		return nil, errors.New("missing server URL; pass --server-url or set JARVIS_SERVER_URL")
+		return nil, errors.New("missing server URL; pass --server-url or set CORDYCEPS_SERVER_URL")
 	}
 
 	if bootstrapToken == "" {
-		return nil, errors.New("missing bootstrap token; pass --bootstrap-token or set JARVIS_BOOTSTRAP_TOKEN")
+		return nil, errors.New("missing bootstrap token; pass --bootstrap-token or set CORDYCEPS_BOOTSTRAP_TOKEN")
 	}
 
 	hostname, _ := os.Hostname()

@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct JarvisRemoteApp: App {
+struct CordycepsRemoteApp: App {
   var body: some Scene {
     WindowGroup {
       ContentView()

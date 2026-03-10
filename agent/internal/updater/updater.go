@@ -148,7 +148,7 @@ func parseRequest(args map[string]any) (updateRequest, error) {
 
 func stagePackage(request updateRequest) (string, error) {
 	dir := os.TempDir()
-	stagePath := filepath.Join(dir, fmt.Sprintf("jarvis-agent-update-%d.exe", time.Now().UTC().UnixNano()))
+	stagePath := filepath.Join(dir, fmt.Sprintf("cordyceps-agent-update-%d.exe", time.Now().UTC().UnixNano()))
 	partialPath := stagePath + ".part"
 
 	_ = os.Remove(stagePath)
@@ -276,7 +276,7 @@ func verifyWindowsExecutable(path string) error {
 }
 
 func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, version string) (string, error) {
-	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("jarvis-agent-updater-%d.cmd", time.Now().UTC().UnixNano()))
+	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("cordyceps-agent-updater-%d.cmd", time.Now().UTC().UnixNano()))
 
 	escape := func(value string) string {
 		sanitized := strings.ReplaceAll(value, "%", "%%")

@@ -1,6 +1,6 @@
-# JarvisRemote iOS App
+# CordycepsRemote iOS App
 
-Native SwiftUI client for controlling Jarvis agents from iPhone.
+Native SwiftUI client for controlling Cordyceps agents from iPhone.
 
 ## What it supports
 
@@ -25,8 +25,8 @@ Native SwiftUI client for controlling Jarvis agents from iPhone.
 
 ## Open in Xcode
 
-1. Open `ios/JarvisRemote/JarvisRemote.xcodeproj`
-2. Select target `JarvisRemote`
+1. Open `ios/CordycepsRemote/CordycepsRemote.xcodeproj`
+2. Select target `CordycepsRemote`
 3. Set your signing team and bundle id (if needed)
 4. Run on an iPhone simulator or physical iPhone
 
@@ -34,7 +34,7 @@ Native SwiftUI client for controlling Jarvis agents from iPhone.
 
 Set these inside the app:
 
-- API base URL: your Jarvis server origin (example `https://mpmc.ddns.net`)
+- API base URL: your Cordyceps server origin (example `https://mpmc.ddns.net`)
 - Token: `PHONE_API_TOKEN` value from your server
 
 Then tap `Load` to fetch devices.

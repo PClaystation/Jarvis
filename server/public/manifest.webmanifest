@@ -1,6 +1,6 @@
 {
-  "name": "Jarvis Remote",
-  "short_name": "Jarvis",
+  "name": "Cordyceps Remote",
+  "short_name": "Cordyceps",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
