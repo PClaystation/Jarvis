@@ -10,12 +10,14 @@ import { CommandRouter } from "../router/commandRouter";
 import { DeviceRegistry } from "./deviceRegistry";
 import { EventHub } from "../events/eventHub";
 import { log } from "../utils/logger";
+import type { QueuedUpdateDispatcher } from "../update/queuedUpdateDispatcher";
 
 interface RealtimeDeps {
   db: Database;
   registry: DeviceRegistry;
   router: CommandRouter;
   eventHub: EventHub;
+  queuedUpdateDispatcher: QueuedUpdateDispatcher;
   wsAuthTimeoutMs: number;
   wsPingIntervalMs: number;
   wsMaxMessageBytes: number;
@@ -377,6 +379,8 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
             kind: "hello_ack",
             server_time: new Date().toISOString(),
           });
+
+          deps.queuedUpdateDispatcher.kick(hello.device_id);
 
           pingTimer = setInterval(() => {
             if (!isSocketOpen(socket)) {

@@ -27,6 +27,7 @@ class MockSocket {
 
 class FakeRouter {
   public dispatchedMany: Array<{ requestId: string; deviceIds: string[]; type: string }> = [];
+  public dispatchedToDevice: Array<{ requestId: string; deviceId: string; type: string }> = [];
 
   public pendingCount(): number {
     return 0;
@@ -43,6 +44,7 @@ class FakeRouter {
     message: string;
     completed_at: string;
   }> {
+    this.dispatchedToDevice.push({ requestId: input.requestId, deviceId: input.deviceId, type: input.command.type });
     return {
       request_id: input.requestId,
       device_id: input.deviceId,
@@ -129,7 +131,7 @@ async function createHarness() {
     version: "1.0.0",
     hostname: "host",
     username: "user",
-    capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control"],
+    capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
   });
 
   registry.register({
@@ -138,7 +140,7 @@ async function createHarness() {
     version: "1.0.0",
     hostname: "host",
     username: "user",
-    capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control"],
+    capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
   });
 
   db.markDeviceOnline({
@@ -146,7 +148,7 @@ async function createHarness() {
     version: "1.0.0",
     hostname: "host",
     username: "user",
-    capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control"],
+    capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
   });
 
   const server = Fastify({ logger: false });
@@ -169,6 +171,41 @@ async function createHarness() {
   };
 
   return { server, db, registry, router, cleanup };
+}
+
+function addOnlineDevice(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  input: { deviceId: string; capabilities: string[] },
+): void {
+  const { db, registry } = harness;
+  const { deviceId, capabilities } = input;
+
+  db.enrollDevice({
+    deviceId,
+    tokenHash: sha256Hex(`${deviceId}-token`),
+    displayName: deviceId,
+    version: "1.0.0",
+    hostname: "host",
+    username: "user",
+    capabilities,
+  });
+
+  registry.register({
+    deviceId,
+    socket: new MockSocket(),
+    version: "1.0.0",
+    hostname: "host",
+    username: "user",
+    capabilities,
+  });
+
+  db.markDeviceOnline({
+    deviceId,
+    version: "1.0.0",
+    hostname: "host",
+    username: "user",
+    capabilities,
+  });
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -225,6 +262,76 @@ test("scoped API key can read devices but cannot execute updates", async () => {
     });
 
     assert.equal(updateAttempt.statusCode, 403);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("update can be queued for an offline device", async () => {
+  const harness = await createHarness();
+  const { server, db, registry, router, cleanup } = harness;
+
+  try {
+    registry.disconnect("m1");
+    db.markDeviceOffline("m1");
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/update",
+      headers: authHeaders("owner-token"),
+      payload: {
+        target: "m1",
+        version: "1.0.1",
+        package_url: "https://example.com/agent.exe",
+        sha256: "a".repeat(64),
+        queue_if_offline: true,
+      },
+    });
+
+    assert.equal(response.statusCode, 202);
+    const body = response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.queued, true);
+    assert.equal(typeof body.request_id, "string");
+    assert.equal(router.dispatchedToDevice.length, 0);
+
+    const queued = db.listQueuedUpdatesForDevice("m1");
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0]?.request_id, body.request_id);
+    assert.equal(queued[0]?.version, "1.0.1");
+    assert.equal(queued[0]?.package_url, "https://example.com/agent.exe");
+
+    const logs = db.listCommandLogs({
+      limit: 20,
+      deviceId: "m1",
+      parsedType: "AGENT_UPDATE",
+    });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0]?.status, "queued");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("queue_if_offline requires a single target device", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/update",
+      headers: authHeaders("owner-token"),
+      payload: {
+        target: "all",
+        version: "1.0.1",
+        package_url: "https://example.com/agent.exe",
+        queue_if_offline: true,
+      },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error_code, "INVALID_QUEUE_TARGET");
   } finally {
     await cleanup();
   }
@@ -320,6 +427,138 @@ test("group command requires explicit bulk confirmation", async () => {
     assert.equal(body.ok, true);
     assert.equal(router.dispatchedMany.length, 1);
     assert.deepEqual(router.dispatchedMany[0].deviceIds, ["m1"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("devices endpoint includes derived agent profile", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    addOnlineDevice(harness, {
+      deviceId: "s1",
+      capabilities: ["profile_s", "media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
+    });
+
+    const response = await server.inject({
+      method: "GET",
+      url: "/api/devices",
+      headers: {
+        authorization: "Bearer owner-token",
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.ok, true);
+
+    const devices = body.devices as Array<{ device_id: string; profile?: string }>;
+    const s1 = devices.find((device) => device.device_id === "s1");
+    assert.equal(s1?.profile, "s");
+
+    const m1 = devices.find((device) => device.device_id === "m1");
+    assert.equal(m1?.profile, "legacy");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("profile policy blocks lite agents from standard power commands", async () => {
+  const harness = await createHarness();
+  const { server, router, cleanup } = harness;
+
+  try {
+    addOnlineDevice(harness, {
+      deviceId: "s1",
+      capabilities: ["profile_s", "media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
+    });
+
+    const blocked = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "s1 sleep",
+      },
+    });
+
+    assert.equal(blocked.statusCode, 409);
+    const blockedBody = blocked.json();
+    assert.equal(blockedBody.error_code, "COMMAND_NOT_ALLOWED_FOR_PROFILE");
+
+    addOnlineDevice(harness, {
+      deviceId: "e1",
+      capabilities: [
+        "profile_e",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "power_control",
+        "session_control",
+        "updater",
+        "emergency_lockdown",
+      ],
+    });
+
+    const allowed = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "e1 sleep",
+      },
+    });
+
+    assert.equal(allowed.statusCode, 200);
+    const allowedBody = allowed.json();
+    assert.equal(allowedBody.parsed_type, "SYSTEM_SLEEP");
+    assert.equal(router.dispatchedToDevice.some((item) => item.deviceId === "e1" && item.type === "SYSTEM_SLEEP"), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("profile policy keeps emergency command available to se profile", async () => {
+  const harness = await createHarness();
+  const { server, router, cleanup } = harness;
+
+  try {
+    addOnlineDevice(harness, {
+      deviceId: "se1",
+      capabilities: [
+        "profile_se",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "updater",
+        "emergency_lockdown",
+      ],
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "se1 panic confirm",
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.parsed_type, "EMERGENCY_LOCKDOWN");
+    assert.equal(
+      router.dispatchedToDevice.some((item) => item.deviceId === "se1" && item.type === "EMERGENCY_LOCKDOWN"),
+      true,
+    );
   } finally {
     await cleanup();
   }

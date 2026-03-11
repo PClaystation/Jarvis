@@ -33,6 +33,7 @@ const updateVersionInput = document.getElementById("updateVersionInput");
 const updateUrlInput = document.getElementById("updateUrlInput");
 const updateShaInput = document.getElementById("updateShaInput");
 const updateSizeInput = document.getElementById("updateSizeInput");
+const updateQueueOfflineInput = document.getElementById("updateQueueOfflineInput");
 const pushUpdateBtn = document.getElementById("pushUpdateBtn");
 
 const groupIdInput = document.getElementById("groupIdInput");
@@ -65,6 +66,7 @@ const UPDATE_VERSION_KEY = "cordyceps_update_version";
 const UPDATE_URL_KEY = "cordyceps_update_url";
 const UPDATE_SHA_KEY = "cordyceps_update_sha";
 const UPDATE_SIZE_KEY = "cordyceps_update_size";
+const UPDATE_QUEUE_OFFLINE_KEY = "cordyceps_update_queue_offline";
 const LAST_COMMAND_SUCCESS_KEY = "cordyceps_last_command_success";
 const BOOTSTRAP_COMMAND_KEY = "cordyceps_bootstrap_command";
 const BOOTSTRAP_ACTION_KEY = "cordyceps_bootstrap_action";
@@ -1218,7 +1220,14 @@ async function createApiKey() {
 }
 
 function persistUpdateSettings() {
-  if (!updateTargetInput || !updateVersionInput || !updateUrlInput || !updateShaInput || !updateSizeInput) {
+  if (
+    !updateTargetInput ||
+    !updateVersionInput ||
+    !updateUrlInput ||
+    !updateShaInput ||
+    !updateSizeInput ||
+    !updateQueueOfflineInput
+  ) {
     return;
   }
 
@@ -1227,10 +1236,18 @@ function persistUpdateSettings() {
   localStorage.setItem(UPDATE_URL_KEY, (updateUrlInput.value || "").trim());
   localStorage.setItem(UPDATE_SHA_KEY, normalizeActionText(updateShaInput.value));
   localStorage.setItem(UPDATE_SIZE_KEY, (updateSizeInput.value || "").trim());
+  localStorage.setItem(UPDATE_QUEUE_OFFLINE_KEY, updateQueueOfflineInput.checked ? "1" : "0");
 }
 
 async function pushUpdate() {
-  if (!updateTargetInput || !updateVersionInput || !updateUrlInput || !updateShaInput || !updateSizeInput) {
+  if (
+    !updateTargetInput ||
+    !updateVersionInput ||
+    !updateUrlInput ||
+    !updateShaInput ||
+    !updateSizeInput ||
+    !updateQueueOfflineInput
+  ) {
     throw new Error("Update controls are not available in this app build.");
   }
 
@@ -1239,6 +1256,7 @@ async function pushUpdate() {
   const packageUrl = (updateUrlInput.value || "").trim();
   const sha256 = normalizeActionText(updateShaInput.value);
   const sizeRaw = (updateSizeInput.value || "").trim();
+  const queueIfOffline = updateQueueOfflineInput.checked && target !== "all";
 
   if (!target) {
     throw new Error("Update target is required.");
@@ -1283,6 +1301,7 @@ async function pushUpdate() {
     target,
     version,
     package_url: packageUrl,
+    queue_if_offline: queueIfOffline,
     ...(sha256 ? { sha256 } : {}),
     ...(sizeBytes ? { size_bytes: sizeBytes } : {}),
   };
@@ -1548,6 +1567,7 @@ function applyBootstrapLink() {
   const updateUrl = read("update_url");
   const updateSha = read("update_sha");
   const updateSize = read("update_size");
+  const updateQueueOffline = read("update_queue_offline");
 
   let applied = false;
 
@@ -1593,6 +1613,13 @@ function applyBootstrapLink() {
     applied = true;
   }
 
+  if (updateQueueOffline) {
+    const normalized = updateQueueOffline.trim().toLowerCase();
+    const enabled = normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+    localStorage.setItem(UPDATE_QUEUE_OFFLINE_KEY, enabled ? "1" : "0");
+    applied = true;
+  }
+
   if (command) {
     localStorage.setItem(BOOTSTRAP_COMMAND_KEY, command.trim().toLowerCase());
     applied = true;
@@ -1633,12 +1660,13 @@ function init() {
     targetInput.value = lastTarget;
   }
 
-  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput) {
+  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput && updateQueueOfflineInput) {
     updateTargetInput.value = localStorage.getItem(UPDATE_TARGET_KEY) || targetInput.value || "m1";
     updateVersionInput.value = localStorage.getItem(UPDATE_VERSION_KEY) || "";
     updateUrlInput.value = localStorage.getItem(UPDATE_URL_KEY) || "";
     updateShaInput.value = localStorage.getItem(UPDATE_SHA_KEY) || "";
     updateSizeInput.value = localStorage.getItem(UPDATE_SIZE_KEY) || "";
+    updateQueueOfflineInput.checked = localStorage.getItem(UPDATE_QUEUE_OFFLINE_KEY) !== "0";
   }
 
   renderActionOptions("");
@@ -1882,7 +1910,7 @@ function init() {
     });
   }
 
-  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput) {
+  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput && updateQueueOfflineInput) {
     updateTargetInput.addEventListener("change", () => {
       persistUpdateSettings();
     });
@@ -1896,6 +1924,9 @@ function init() {
       persistUpdateSettings();
     });
     updateSizeInput.addEventListener("change", () => {
+      persistUpdateSettings();
+    });
+    updateQueueOfflineInput.addEventListener("change", () => {
       persistUpdateSettings();
     });
   }

@@ -11,6 +11,11 @@ import { randomToken, sha256Hex } from "../utils/crypto";
 import { makeRequestId } from "../utils/id";
 import { log } from "../utils/logger";
 import { inspectPackageFromUrl, PackageInspectionError } from "../update/packageInspector";
+import {
+  inferDesignationPrefixFromPackageUrl,
+  prepareDesignationChange,
+  type PreparedDesignationChange,
+} from "../update/designation";
 
 interface ApiDeps {
   config: AppConfig;
@@ -49,11 +54,7 @@ interface UpdateRequestBody {
   package_url?: string;
   sha256?: string;
   size_bytes?: unknown;
-}
-
-interface PreparedDesignationChange {
-  currentDeviceId: string;
-  nextDeviceId: string;
+  queue_if_offline?: unknown;
 }
 
 interface RenameDeviceBody {
@@ -136,15 +137,56 @@ const ADMIN_ONLY_COMMANDS = new Set([
   "ADMIN_EXEC_POWERSHELL",
   "PROCESS_LIST",
   "PROCESS_KILL",
+  "PROCESS_START",
+  "PROCESS_DETAILS",
   "SERVICE_LIST",
   "SERVICE_CONTROL",
+  "SERVICE_DETAILS",
   "FILE_READ",
   "FILE_WRITE",
   "FILE_APPEND",
+  "FILE_COPY",
+  "FILE_MOVE",
+  "FILE_EXISTS",
+  "FILE_HASH",
+  "FILE_TAIL",
   "FILE_DELETE",
   "FILE_LIST",
   "FILE_MKDIR",
+  "NETWORK_INFO",
+  "NETWORK_TEST",
+  "NETWORK_FLUSH_DNS",
+  "EVENT_LOG_QUERY",
+  "ENV_LIST",
+  "ENV_GET",
   "SYSTEM_INFO",
+]);
+
+type AgentProfile = "s" | "se" | "t" | "e" | "a" | "legacy";
+
+const LITE_PROFILE_COMMANDS = new Set([
+  "PING",
+  "OPEN_APP",
+  "MEDIA_PLAY",
+  "MEDIA_PAUSE",
+  "MEDIA_PLAY_PAUSE",
+  "MEDIA_NEXT",
+  "MEDIA_PREVIOUS",
+  "VOLUME_UP",
+  "VOLUME_DOWN",
+  "MUTE",
+  "LOCK_PC",
+  "NOTIFY",
+  "CLIPBOARD_SET",
+  "SYSTEM_DISPLAY_OFF",
+]);
+
+const STANDARD_PROFILE_EXTRA_COMMANDS = new Set([
+  "SYSTEM_SLEEP",
+  "SYSTEM_SIGN_OUT",
+  "SYSTEM_SHUTDOWN",
+  "SYSTEM_RESTART",
+  "AGENT_REMOVE",
 ]);
 
 function makeLogId(requestId: string, deviceId: string): string {
@@ -409,6 +451,102 @@ function requiredCapabilityForCommand(type: string): string | null {
   return null;
 }
 
+function profileFromDeviceId(deviceId: string): AgentProfile {
+  const normalized = asTrimmedString(deviceId).toLowerCase();
+  if (normalized.startsWith("se")) {
+    return "se";
+  }
+
+  if (normalized.startsWith("s")) {
+    return "s";
+  }
+
+  if (normalized.startsWith("e")) {
+    return "e";
+  }
+
+  if (normalized.startsWith("t")) {
+    return "t";
+  }
+
+  if (normalized.startsWith("a")) {
+    return "a";
+  }
+
+  return "legacy";
+}
+
+function resolveDeviceProfile(deviceId: string, capabilities: string[] | null | undefined): AgentProfile {
+  const normalizedCapabilities = new Set(
+    (capabilities ?? []).map((item) => asTrimmedString(item).toLowerCase()).filter((item) => item.length > 0),
+  );
+
+  if (normalizedCapabilities.has("profile_se")) {
+    return "se";
+  }
+
+  if (normalizedCapabilities.has("profile_s")) {
+    return "s";
+  }
+
+  if (normalizedCapabilities.has("profile_e")) {
+    return "e";
+  }
+
+  if (normalizedCapabilities.has("profile_t")) {
+    return "t";
+  }
+
+  if (normalizedCapabilities.has("profile_a")) {
+    return "a";
+  }
+
+  return profileFromDeviceId(deviceId);
+}
+
+function isCommandAllowedForProfile(profile: AgentProfile, commandType: string): boolean {
+  if (profile === "legacy" || profile === "a") {
+    return true;
+  }
+
+  if (profile === "s") {
+    return LITE_PROFILE_COMMANDS.has(commandType);
+  }
+
+  if (profile === "se") {
+    return LITE_PROFILE_COMMANDS.has(commandType) || commandType === "EMERGENCY_LOCKDOWN";
+  }
+
+  if (profile === "t") {
+    return LITE_PROFILE_COMMANDS.has(commandType) || STANDARD_PROFILE_EXTRA_COMMANDS.has(commandType);
+  }
+
+  if (profile === "e") {
+    return (
+      LITE_PROFILE_COMMANDS.has(commandType) ||
+      STANDARD_PROFILE_EXTRA_COMMANDS.has(commandType) ||
+      commandType === "EMERGENCY_LOCKDOWN"
+    );
+  }
+
+  return false;
+}
+
+function profileLabel(profile: AgentProfile): string {
+  if (profile === "legacy") {
+    return "legacy";
+  }
+
+  return `${profile}`;
+}
+
+function withProfile<T extends { device_id: string; capabilities: string[] }>(device: T): T & { profile: AgentProfile } {
+  return {
+    ...device,
+    profile: resolveDeviceProfile(device.device_id, device.capabilities),
+  };
+}
+
 function parseDispatchError(error: unknown): { code: string; message: string; httpStatus: number } {
   if (!(error instanceof DispatchError)) {
     const message = error instanceof Error ? error.message : "Unknown routing error";
@@ -552,67 +690,21 @@ function normalizeOptionalSizeBytes(value: unknown, maxBytes: number): number | 
   return parsed;
 }
 
-function inferDesignationPrefixFromPackageUrl(packageUrl: string): string | null {
-  const value = packageUrl.trim().toLowerCase();
-  if (!value) {
-    return null;
+function normalizeBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
   }
 
-  if (value.includes("se1-agent")) {
-    return "se";
+  if (typeof value === "number") {
+    return value !== 0;
   }
 
-  if (value.includes("e1-agent")) {
-    return "e";
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
   }
 
-  if (value.includes("t1-agent")) {
-    return "t";
-  }
-
-  if (value.includes("s1-agent")) {
-    return "s";
-  }
-
-  if (value.includes("a1-agent")) {
-    return "a";
-  }
-
-  if (value.includes("cordyceps-agent") || value.includes("jarvis-agent")) {
-    return "m";
-  }
-
-  return null;
-}
-
-function deviceIdPrefix(deviceId: string): string {
-  const match = deviceId.trim().toLowerCase().match(/^[a-z]+/);
-  return match ? match[0].slice(0, 1) : "";
-}
-
-function prepareDesignationChange(
-  db: Database,
-  deviceId: string,
-  nextPrefix: string | null,
-): PreparedDesignationChange | null {
-  if (!nextPrefix) {
-    return null;
-  }
-
-  const currentPrefix = deviceIdPrefix(deviceId);
-  if (!currentPrefix || currentPrefix === nextPrefix) {
-    return null;
-  }
-
-  const nextDeviceId = db.allocateNextDeviceId(nextPrefix);
-  if (!db.cloneDeviceWithNewId(deviceId, nextDeviceId)) {
-    return null;
-  }
-
-  return {
-    currentDeviceId: deviceId,
-    nextDeviceId,
-  };
+  return false;
 }
 
 function makeUpdateRawText(target: string, version: string, packageUrl: string): string {
@@ -914,9 +1006,11 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
+    const devices = deps.db.listDevices().map((device) => withProfile(device));
+
     return {
       ok: true,
-      devices: deps.db.listDevices(),
+      devices,
     };
   });
 
@@ -946,9 +1040,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
+    const updated = deps.db.getDevice(deviceId);
     reply.send({
       ok: true,
-      device: deps.db.getDevice(deviceId),
+      device: updated ? withProfile(updated) : null,
       message: displayName ? `Saved name for ${deviceId}` : `Cleared name for ${deviceId}`,
     });
   });
@@ -1187,6 +1282,17 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         continue;
       }
 
+      const profile = resolveDeviceProfile(deviceId, connected.capabilities);
+      if (!isCommandAllowedForProfile(profile, parsedCommand.type)) {
+        reply.code(409).send({
+          ok: false,
+          request_id: requestId,
+          message: `${deviceId} (${profileLabel(profile)} profile) blocks ${parsedCommand.type.toLowerCase()}`,
+          error_code: "COMMAND_NOT_ALLOWED_FOR_PROFILE",
+        });
+        return;
+      }
+
       if (requiredCapability && !connected.capabilities.includes(requiredCapability)) {
         reply.code(409).send({
           ok: false,
@@ -1362,6 +1468,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     const version = normalizeUpdateVersion(body.version);
     const packageUrl = normalizeUpdatePackageUrl(body.package_url, deps.config.enforceHttpsUpdateUrl);
     const providedSha256 = normalizeSha256(body.sha256);
+    const queueIfOffline = normalizeBoolean(body.queue_if_offline);
 
     if (!isValidTargetFormat(target)) {
       reply.code(400).send({
@@ -1369,6 +1476,16 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         request_id: requestId,
         message: "target must be a device id like t1 or all",
         error_code: "INVALID_TARGET",
+      });
+      return;
+    }
+
+    if (queueIfOffline && target === "all") {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "queue_if_offline is supported only for a single target device",
+        error_code: "INVALID_QUEUE_TARGET",
       });
       return;
     }
@@ -1469,7 +1586,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     const nextDesignationPrefix = inferDesignationPrefixFromPackageUrl(resolvedPackageUrl);
 
     const targetDeviceIds = target === "all" ? deps.registry.listOnlineDeviceIds() : [target];
-    if (targetDeviceIds.length === 0) {
+    if (target === "all" && targetDeviceIds.length === 0) {
       reply.code(409).send({
         ok: false,
         request_id: requestId,
@@ -1481,6 +1598,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
     const updateRawText = makeUpdateRawText(target, version, resolvedPackageUrl);
     const preparedDesignationChanges = new Map<string, PreparedDesignationChange>();
+    const queuedOfflineDeviceIds = new Set<string>();
     const rollbackPreparedDesignationChanges = (): void => {
       for (const designationChange of preparedDesignationChanges.values()) {
         deps.db.deleteDevice(designationChange.nextDeviceId);
@@ -1502,35 +1620,40 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
       const connected = deps.registry.get(deviceId);
       if (!connected) {
-        rollbackPreparedDesignationChanges();
-        reply.code(409).send({
-          ok: false,
-          request_id: requestId,
-          message: `${deviceId} is offline`,
-          error_code: "DEVICE_OFFLINE",
-        });
-        return;
+        if (!queueIfOffline) {
+          rollbackPreparedDesignationChanges();
+          reply.code(409).send({
+            ok: false,
+            request_id: requestId,
+            message: `${deviceId} is offline`,
+            error_code: "DEVICE_OFFLINE",
+          });
+          return;
+        }
+
+        queuedOfflineDeviceIds.add(deviceId);
+      } else {
+        const hasUpdater = Array.isArray(connected.capabilities) && connected.capabilities.includes("updater");
+        if (!hasUpdater) {
+          rollbackPreparedDesignationChanges();
+          reply.code(409).send({
+            ok: false,
+            request_id: requestId,
+            message: `${deviceId} does not support remote updates yet. Update this device manually once with the latest agent.`,
+            error_code: "UPDATER_NOT_SUPPORTED",
+          });
+          return;
+        }
+
+        const designationChange = prepareDesignationChange(deps.db, deviceId, nextDesignationPrefix);
+        if (designationChange) {
+          preparedDesignationChanges.set(deviceId, designationChange);
+        }
       }
 
-      const hasUpdater = Array.isArray(connected.capabilities) && connected.capabilities.includes("updater");
-      if (!hasUpdater) {
-        rollbackPreparedDesignationChanges();
-        reply.code(409).send({
-          ok: false,
-          request_id: requestId,
-          message: `${deviceId} does not support remote updates yet. Update this device manually once with the latest agent.`,
-          error_code: "UPDATER_NOT_SUPPORTED",
-        });
-        return;
-      }
-
-      const designationChange = prepareDesignationChange(deps.db, deviceId, nextDesignationPrefix);
-      if (designationChange) {
-        preparedDesignationChanges.set(deviceId, designationChange);
-      }
-
+      const logId = makeLogId(requestId, deviceId);
       deps.db.insertCommandLog({
-        id: makeLogId(requestId, deviceId),
+        id: logId,
         requestId,
         deviceId,
         source,
@@ -1547,6 +1670,21 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         resultMessage: null,
         errorCode: null,
       });
+
+      if (!connected) {
+        deps.db.upsertQueuedUpdate({
+          id: logId,
+          requestId,
+          deviceId,
+          source,
+          rawText: updateRawText,
+          parsedTarget: target,
+          version,
+          packageUrl: resolvedPackageUrl,
+          sha256,
+          sizeBytes: packageSizeBytes,
+        });
+      }
 
       publishCommandLogEvent(deps, {
         requestId,
@@ -1569,9 +1707,27 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         ...(packageSizeBytes ? { size_bytes: packageSizeBytes } : {}),
       },
     };
+    const immediateTargetDeviceIds = targetDeviceIds.filter((deviceId) => !queuedOfflineDeviceIds.has(deviceId));
 
     if (target !== "all") {
       const deviceId = targetDeviceIds[0];
+      if (queuedOfflineDeviceIds.has(deviceId)) {
+        reply.code(202).send({
+          ok: true,
+          request_id: requestId,
+          target: deviceId,
+          parsed_type: "AGENT_UPDATE",
+          message: `${deviceId} is offline. Update queued and will run automatically on next reconnect.`,
+          queued: true,
+          version,
+          package_url: resolvedPackageUrl,
+          sha256,
+          hash_source: hashSource,
+          package_size_bytes: packageSizeBytes ?? null,
+        });
+        return;
+      }
+
       try {
         const designationChange = preparedDesignationChanges.get(deviceId);
         const commandWithDesignationChange = designationChange
@@ -1683,7 +1839,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     }
 
     const results = await Promise.all(
-      targetDeviceIds.map(async (deviceId) => {
+      immediateTargetDeviceIds.map(async (deviceId) => {
         const designationChange = preparedDesignationChanges.get(deviceId);
         const commandForDevice = designationChange
           ? {
@@ -1861,6 +2017,17 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           request_id: requestId,
           message: `${deviceId} is offline`,
           error_code: "DEVICE_OFFLINE",
+        });
+        return;
+      }
+
+      const profile = resolveDeviceProfile(deviceId, connected.capabilities);
+      if (!isCommandAllowedForProfile(profile, parsed.command.type)) {
+        reply.code(409).send({
+          ok: false,
+          request_id: requestId,
+          message: `${deviceId} (${profileLabel(profile)} profile) blocks ${parsed.command.type.toLowerCase()}`,
+          error_code: "COMMAND_NOT_ALLOWED_FOR_PROFILE",
         });
         return;
       }

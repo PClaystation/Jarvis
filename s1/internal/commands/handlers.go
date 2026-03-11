@@ -40,6 +40,7 @@ var openAppTargets = map[string]string{
 
 func Capabilities() []string {
 	return []string{
+		"profile_s",
 		"media_control",
 		"notifications",
 		"clipboard_control",
@@ -47,6 +48,7 @@ func Capabilities() []string {
 		"locking",
 		"open_app",
 		"updater",
+		"lite_profile_s1",
 	}
 }
 

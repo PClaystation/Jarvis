@@ -37,9 +37,12 @@ Phone-driven remote command system:
   - `EMERGENCY_LOCKDOWN` (implemented in `e1` and `se1` agent families only)
   - Admin-only command family (implemented in `a1` agent family):
     - `ADMIN_EXEC_CMD`, `ADMIN_EXEC_POWERSHELL`
-    - `PROCESS_LIST`, `PROCESS_KILL`
-    - `SERVICE_LIST`, `SERVICE_CONTROL`
-    - `FILE_READ`, `FILE_WRITE`, `FILE_APPEND`, `FILE_DELETE`, `FILE_LIST`, `FILE_MKDIR`
+    - `PROCESS_LIST`, `PROCESS_KILL`, `PROCESS_START`, `PROCESS_DETAILS`
+    - `SERVICE_LIST`, `SERVICE_CONTROL`, `SERVICE_DETAILS`
+    - `FILE_READ`, `FILE_WRITE`, `FILE_APPEND`, `FILE_COPY`, `FILE_MOVE`, `FILE_EXISTS`, `FILE_HASH`, `FILE_TAIL`, `FILE_DELETE`, `FILE_LIST`, `FILE_MKDIR`
+    - `NETWORK_INFO`, `NETWORK_TEST`, `NETWORK_FLUSH_DNS`
+    - `EVENT_LOG_QUERY`
+    - `ENV_LIST`, `ENV_GET`
     - `SYSTEM_INFO`
   - `AGENT_UPDATE` (via `POST /api/update`)
 
@@ -47,12 +50,25 @@ Phone-driven remote command system:
 
 - `server/` Node.js + TypeScript dispatcher
 - `agent/` Go Windows agent (single binary)
-- `t1/` Go Windows agent family (`t*` device IDs)
-- `s1/` Go Windows safer agent family (`s*` device IDs, keeps updater but drops sleep/sign-out/shutdown/restart)
-- `se1/` Go Windows safest agent family (`se*` device IDs, safe commands plus emergency lockdown)
-- `e1/` Go Windows agent family (`e*` device IDs, includes emergency lockdown command)
-- `a1/` Go Windows admin agent family (`a*` device IDs, includes deep admin commands)
+- `s1/` Go Windows lite agent family (`s*` IDs; basic control only, no emergency lockdown)
+- `se1/` Go Windows lite+emergency agent family (`se*` IDs; `s` surface + emergency lockdown)
+- `t1/` Go Windows standard remote-control family (`t*` IDs; regular full remote control)
+- `e1/` Go Windows secure+emergency family (`e*` IDs; `t` + emergency lockdown + stricter local allowlist security)
+- `a1/` Go Windows admin family (`a*` IDs; broad system operations)
 - `docs/iphone-shortcut.md` iPhone Shortcut wiring
+- `docs/agent-profiles.md` canonical profile matrix and command-surface policy
+
+## Agent Profiles
+
+Canonical profile intent:
+
+- `s`: super-basic lite profile; no emergency lockdown.
+- `se`: `s` + emergency lockdown security.
+- `t`: regular remote control profile.
+- `e`: `t` + emergency lockdown + stricter security behavior.
+- `a`: admin profile with widest control surface.
+
+The full command-surface matrix is documented in [docs/agent-profiles.md](docs/agent-profiles.md).
 
 ## Command Language (Phone -> Server)
 
@@ -83,9 +99,19 @@ Examples:
 - `a1 admin ps Get-Process | Select-Object -First 5`
 - `a1 admin process list chrome`
 - `a1 admin process kill notepad`
+- `a1 admin process start notepad.exe`
+- `a1 admin process details explorer`
 - `a1 admin service restart spooler`
+- `a1 admin service details spooler`
 - `a1 admin file read C:\Temp\notes.txt`
 - `a1 admin file write C:\Temp\notes.txt :: hello from admin`
+- `a1 admin file copy C:\Temp\notes.txt -> C:\Temp\notes-copy.txt`
+- `a1 admin file hash sha512 C:\Temp\notes.txt`
+- `a1 admin file tail C:\Temp\notes.txt 30`
+- `a1 admin network info`
+- `a1 admin network test 1.1.1.1 443`
+- `a1 admin event log System limit 5`
+- `a1 admin env get PATH`
 - `a1 admin system info`
 - `m1 notify hello`
 - `all ping`
@@ -99,6 +125,7 @@ Notes:
 - emergency command requires explicit confirmation (`panic confirm`, `lockdown confirm`, or `emergency confirm`)
 - agent removal requires explicit remote confirmation (`remove agent confirm confirm`) and then local host approval on the target PC
 - admin commands must use `admin ...` and are dispatched only to devices that advertise `admin_ops` capability (A1 family)
+- server enforces profile routing policy (`s`, `se`, `t`, `e`, `a`) using capability markers (`profile_s`, `profile_se`, `profile_t`, `profile_e`, `profile_a`) with device-ID prefix fallback
 
 ## Server Setup
 
@@ -160,6 +187,8 @@ Production:
 
 ### Fastest way to add another device (T1 agent)
 
+Use this for the `t` profile: the regular remote-control model (no emergency-lockdown features).
+
 1. Build a USB-ready T1 agent once (on any machine with Go):
 
 ```powershell
@@ -188,7 +217,7 @@ Management:
 
 ### Emergency-capable device family (E1 agent)
 
-Use this on machines where you want remote panic mode with explicit confirmation (`panic confirm`, `lockdown confirm`, `emergency confirm`).
+Use this for the `e` profile: the regular `t` remote-control surface plus emergency lockdown and stricter local safety controls.
 
 1. Build a USB-ready E1 agent once:
 
@@ -200,7 +229,7 @@ cd e1
 2. Run `e1/dist/e1-agent-usb.exe` once on the target device.
 
 On first run it self-installs to `%LOCALAPPDATA%\E1Agent\e1-agent.exe` and auto-designates `e*` IDs when `-DeviceId` is omitted.
-`e1` keeps remote self-update support, but emergency execution is hardened with an explicit local command allowlist, restart-persistent cooldown, local audit log, persisted panic-active state, rollback-on-failure cleanup, and automatic rollback of temporary network isolation. While panic mode is active, only `ping`, `lock`, and another confirmed emergency command remain locally executable.
+`e1` is intentionally distinct from `t1`: it keeps the standard surface but enforces an explicit local command allowlist and emergency hardening (restart-persistent cooldown, local audit log, persisted panic-active state, rollback-on-failure cleanup, and temporary network isolation with failsafe rollback). While panic mode is active, only `ping`, `lock`, and another confirmed emergency command remain executable.
 
 Management:
 
@@ -209,7 +238,7 @@ Management:
 
 ### Safer device family (S1 agent)
 
-Use this on machines where you want the normal media/app/clipboard/notify/lock controls and remote self-update, but you do not want sleep, sign-out, shutdown, or restart exposed remotely.
+Use this for the `s` profile: super-basic control for users who do not want deep remote control and do not want emergency lockdown enabled.
 
 1. Build a USB-ready S1 agent once:
 
@@ -221,7 +250,7 @@ cd s1
 2. Run `s1/dist/s1-agent-usb.exe` once on the target device.
 
 On first run it self-installs to `%LOCALAPPDATA%\S1Agent\s1-agent.exe` and auto-designates `s*` IDs when `-DeviceId` is omitted.
-`s1` keeps remote self-update support, but its command handlers intentionally omit the more destructive power/session actions from `t1`.
+`s1` is the smallest non-admin surface: no sleep/sign-out/shutdown/restart, no remove-agent path, and no emergency-lockdown feature.
 
 Management:
 
@@ -230,7 +259,7 @@ Management:
 
 ### Safest device family (SE1 agent)
 
-Use this on machines where you want the reduced `s1` command surface and the hardened emergency isolation flow from `e1`. This is the safest profile: normal remote control excludes sleep, sign-out, shutdown, and restart, but `panic confirm` remains available for explicit lockdown situations.
+Use this for the `se` profile: the `s` lite surface plus emergency lockdown security.
 
 1. Build a USB-ready SE1 agent once:
 
@@ -242,7 +271,7 @@ cd se1
 2. Run `se1/dist/se1-agent-usb.exe` once on the target device.
 
 On first run it self-installs to `%LOCALAPPDATA%\SE1Agent\se1-agent.exe` and auto-designates `se*` IDs when `-DeviceId` is omitted.
-`se1` keeps remote self-update support, exposes only the safer everyday commands through an explicit allowlist, and adds the emergency lockdown path with restart-persistent cooldown, audit log, persisted panic-active state, rollback-on-failure cleanup, and automatic rollback of temporary network isolation. While panic mode is active, normal media/app/clipboard/display commands are blocked until rollback clears the local emergency state.
+`se1` is intentionally a mix of `s1` and `e1`: it keeps the lite command surface and adds the same hardened emergency-lockdown flow (cooldown, audit log, persisted panic state, rollback cleanup, and failsafe network rollback). During panic mode, normal commands are blocked until rollback clears emergency state.
 
 Management:
 
@@ -251,7 +280,7 @@ Management:
 
 ### Admin-capable device family (A1 agent)
 
-Use this on machines where you want deep remote operations (process, service, file-system, and raw command execution).
+Use this for the `a` profile: admin-level remote control with broad system operations.
 
 1. Build a USB-ready A1 agent once:
 
@@ -263,7 +292,7 @@ cd a1
 2. Run `a1/dist/a1-agent-usb.exe` once on the target device.
 
 On first run it self-installs to `%LOCALAPPDATA%\A1Agent\a1-agent.exe` and auto-designates `a*` IDs when `-DeviceId` is omitted.
-`a1` keeps remote self-update support and advertises `admin_ops` so server-side capability gates allow admin commands only on this family.
+`a1` is intentionally the widest profile: everything in standard control plus the admin command family (process/service/file/network/event-log/environment/system tooling and raw `admin cmd` / `admin ps`).
 
 Management:
 
@@ -341,6 +370,7 @@ Then:
 3. Tap `Load Devices` to verify connectivity
 4. Build/send commands directly from the app
 5. Use the `Agent Update` panel to push updates by target + version + package URL
+   - For a single offline target, keep `Queue update if target is offline` enabled to dispatch automatically on next reconnect
 6. Optional: Share -> `Add to Home Screen` for app-like launch
 
 Notes:
@@ -388,10 +418,20 @@ curl -X POST http://localhost:8080/api/update \
   -d '{"target":"m1","version":"0.2.0","package_url":"https://mpmc.ddns.net/updates/cordyceps-agent-0.2.0.exe"}'
 ```
 
+Queue update for offline single device (dispatches on next reconnect):
+
+```bash
+curl -X POST http://localhost:8080/api/update \
+  -H "Authorization: Bearer YOUR_PHONE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target":"m1","version":"0.2.0","package_url":"https://mpmc.ddns.net/updates/cordyceps-agent-0.2.0.exe","queue_if_offline":true}'
+```
+
 Notes:
 
 - `sha256` is optional. If omitted, server downloads once and computes it before dispatch.
 - Agent still verifies `sha256` locally before replacing itself.
+- `queue_if_offline` is only valid when `target` is a single device ID (not `all`).
 
 ## Remote Update Workflow
 
@@ -403,6 +443,7 @@ Notes:
    - version (for example `0.2.0`)
    - package URL (`https://.../cordyceps-agent-0.2.0.exe`)
    - optional SHA256 (leave blank to auto-inspect on server)
+   - optional queue toggle for offline single-target updates
 5. Tap `Push Update`.
 
 Default behavior:

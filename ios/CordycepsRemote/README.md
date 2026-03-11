@@ -59,6 +59,12 @@ Then tap `Load` to fetch devices.
 ## Notes
 
 - This app talks to the same server endpoints used by the web PWA.
+- Agent profile model is documented in `/docs/agent-profiles.md`:
+  - `s` = lite/basic
+  - `se` = lite + emergency lockdown
+  - `t` = regular remote control
+  - `e` = regular + emergency + stricter security
+  - `a` = admin/widest control surface
 - The app requests microphone + speech recognition permissions only when `Speak` is used.
 - If your server cannot connect, confirm host reachability from iPhone and token validity.
 - iOS ATS still expects secure (HTTPS) remote endpoints. Local-network HTTP targets may require additional ATS exceptions depending on your setup.

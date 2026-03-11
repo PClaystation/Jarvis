@@ -48,3 +48,5 @@ Create one home-screen button shortcut and keep phrases explicit, for example:
 - `m1 play pause`
 - `m1 shutdown`
 - `m3 lock`
+
+Profile reference: see [docs/agent-profiles.md](agent-profiles.md) for the canonical `s` / `se` / `t` / `e` / `a` behavior matrix.

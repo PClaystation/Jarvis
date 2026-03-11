@@ -23,14 +23,28 @@ export type CommandType =
   | "ADMIN_EXEC_POWERSHELL"
   | "PROCESS_LIST"
   | "PROCESS_KILL"
+  | "PROCESS_START"
+  | "PROCESS_DETAILS"
   | "SERVICE_LIST"
   | "SERVICE_CONTROL"
+  | "SERVICE_DETAILS"
   | "FILE_READ"
   | "FILE_WRITE"
   | "FILE_APPEND"
+  | "FILE_COPY"
+  | "FILE_MOVE"
+  | "FILE_EXISTS"
+  | "FILE_HASH"
+  | "FILE_TAIL"
   | "FILE_DELETE"
   | "FILE_LIST"
   | "FILE_MKDIR"
+  | "NETWORK_INFO"
+  | "NETWORK_TEST"
+  | "NETWORK_FLUSH_DNS"
+  | "EVENT_LOG_QUERY"
+  | "ENV_LIST"
+  | "ENV_GET"
   | "SYSTEM_INFO"
   | "AGENT_UPDATE";
 
@@ -96,6 +110,8 @@ export interface CommandDispatchResult {
   completed_at: string;
 }
 
+export type AgentProfile = "s" | "se" | "t" | "e" | "a" | "legacy";
+
 export interface DeviceRecord {
   device_id: string;
   display_name: string | null;
@@ -105,6 +121,7 @@ export interface DeviceRecord {
   hostname: string | null;
   username: string | null;
   capabilities: string[];
+  profile?: AgentProfile;
   created_at: string;
   updated_at: string;
 }

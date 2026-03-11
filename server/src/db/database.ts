@@ -54,6 +54,34 @@ export interface CommandLogQuery {
   status?: string;
 }
 
+export interface QueuedUpdateInsert {
+  id: string;
+  requestId: string;
+  deviceId: string;
+  source: string;
+  rawText: string;
+  parsedTarget: string;
+  version: string;
+  packageUrl: string;
+  sha256: string;
+  sizeBytes: number | null;
+}
+
+export interface QueuedUpdateRecord {
+  id: string;
+  request_id: string;
+  device_id: string;
+  source: string;
+  raw_text: string;
+  parsed_target: string;
+  version: string;
+  package_url: string;
+  sha256: string;
+  size_bytes: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ApiKeyRecord {
   key_id: string;
   name: string;
@@ -173,6 +201,22 @@ export class Database {
         FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS queued_updates (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        raw_text TEXT NOT NULL,
+        parsed_target TEXT NOT NULL,
+        version TEXT NOT NULL,
+        package_url TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS api_keys (
         key_id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -204,6 +248,7 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_command_logs_request_id ON command_logs(request_id);
       CREATE INDEX IF NOT EXISTS idx_command_logs_device_id ON command_logs(device_id);
       CREATE INDEX IF NOT EXISTS idx_command_logs_created_at ON command_logs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_queued_updates_device_id_created_at ON queued_updates(device_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
       CREATE INDEX IF NOT EXISTS idx_api_keys_status ON api_keys(status);
       CREATE INDEX IF NOT EXISTS idx_device_group_members_group_id ON device_group_members(group_id);
@@ -683,6 +728,124 @@ export class Database {
         error_code: input.errorCode ?? null,
         completed_at: completedAt,
       });
+  }
+
+  public upsertQueuedUpdate(input: QueuedUpdateInsert): void {
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+          INSERT INTO queued_updates (
+            id,
+            request_id,
+            device_id,
+            source,
+            raw_text,
+            parsed_target,
+            version,
+            package_url,
+            sha256,
+            size_bytes,
+            created_at,
+            updated_at
+          ) VALUES (
+            @id,
+            @request_id,
+            @device_id,
+            @source,
+            @raw_text,
+            @parsed_target,
+            @version,
+            @package_url,
+            @sha256,
+            @size_bytes,
+            @created_at,
+            @updated_at
+          )
+          ON CONFLICT(id) DO UPDATE SET
+            source = excluded.source,
+            raw_text = excluded.raw_text,
+            parsed_target = excluded.parsed_target,
+            version = excluded.version,
+            package_url = excluded.package_url,
+            sha256 = excluded.sha256,
+            size_bytes = excluded.size_bytes,
+            updated_at = excluded.updated_at
+        `,
+      )
+      .run({
+        id: input.id,
+        request_id: input.requestId,
+        device_id: input.deviceId,
+        source: input.source,
+        raw_text: input.rawText,
+        parsed_target: input.parsedTarget,
+        version: input.version,
+        package_url: input.packageUrl,
+        sha256: input.sha256,
+        size_bytes: input.sizeBytes,
+        created_at: now,
+        updated_at: now,
+      });
+  }
+
+  public listQueuedUpdatesForDevice(deviceId: string): QueuedUpdateRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            request_id,
+            device_id,
+            source,
+            raw_text,
+            parsed_target,
+            version,
+            package_url,
+            sha256,
+            size_bytes,
+            created_at,
+            updated_at
+          FROM queued_updates
+          WHERE device_id = @device_id
+          ORDER BY created_at ASC
+        `,
+      )
+      .all({ device_id: deviceId }) as Array<{
+      id: string;
+      request_id: string;
+      device_id: string;
+      source: string;
+      raw_text: string;
+      parsed_target: string;
+      version: string;
+      package_url: string;
+      sha256: string;
+      size_bytes: number | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      request_id: row.request_id,
+      device_id: row.device_id,
+      source: row.source,
+      raw_text: row.raw_text,
+      parsed_target: row.parsed_target,
+      version: row.version,
+      package_url: row.package_url,
+      sha256: row.sha256,
+      size_bytes: row.size_bytes,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+  }
+
+  public deleteQueuedUpdate(id: string): boolean {
+    const result = this.db.prepare("DELETE FROM queued_updates WHERE id = ?").run(id);
+    return result.changes > 0;
   }
 
   public listCommandLogs(input: CommandLogQuery): CommandLogRecord[] {

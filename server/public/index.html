@@ -105,7 +105,7 @@
 
       <section class="panel">
         <h2>Agent Update</h2>
-        <p class="muted">Push a verified agent EXE update to one device or all online devices.</p>
+        <p class="muted">Push a verified agent EXE update to one device or all online devices. Single-device updates can be queued while offline.</p>
         <div class="danger-zone">
           <strong>Danger Zone</strong>
           <p>Updates restart the agent and can break connectivity if package details are wrong.</p>
@@ -120,6 +120,10 @@
         <input id="updateShaInput" type="text" placeholder="64-char hex (optional)" />
         <label for="updateSizeInput">Size bytes (optional)</label>
         <input id="updateSizeInput" type="text" placeholder="optional exact byte count" />
+        <label for="updateQueueOfflineInput" class="checkbox-line">
+          <input id="updateQueueOfflineInput" type="checkbox" checked />
+          Queue update if target is offline (single target only)
+        </label>
         <div class="row">
           <button id="pushUpdateBtn" type="button" class="primary">Push Update</button>
         </div>

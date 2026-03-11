@@ -5,6 +5,9 @@ const MAX_CLIPBOARD_TEXT_LENGTH = 1000;
 const MAX_REPEAT_STEPS = 20;
 const MAX_ADMIN_INPUT_LENGTH = 4000;
 const MAX_ADMIN_FILE_TEXT_LENGTH = 128 * 1024;
+const MAX_ADMIN_TAIL_LINES = 200;
+const MAX_ADMIN_EVENT_LOG_LIMIT = 25;
+const MAX_NETWORK_TEST_PORT = 65535;
 const PUNCTUATION_EDGE_RE = /^[,.;:!?'"`]+|[,.;:!?'"`]+$/g;
 const PUNCTUATION_LEADING_RE = /^[,.;:!?'"`]+/;
 const PUNCTUATION_TRAILING_RE = /[,.;:!?'"`]+$/;
@@ -519,6 +522,45 @@ function parseAdminCommand(rawCommandPhrase: string): TypedCommand | ParseError 
     };
   }
 
+  const processStartMatch = adminBody.match(/^process\s+start\s+(.+)$/i);
+  if (processStartMatch) {
+    const command = processStartMatch[1]?.trim() ?? "";
+    if (!command) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin process start requires command text",
+      };
+    }
+
+    if (command.length > MAX_ADMIN_INPUT_LENGTH) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `admin process start text too long (max ${MAX_ADMIN_INPUT_LENGTH})`,
+      };
+    }
+
+    return {
+      type: "PROCESS_START",
+      args: { command },
+    };
+  }
+
+  const processDetailsMatch = adminBody.match(/^process\s+details\s+(.+)$/i);
+  if (processDetailsMatch) {
+    const target = processDetailsMatch[1]?.trim() ?? "";
+    if (!target) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin process details requires a process id or name",
+      };
+    }
+
+    return {
+      type: "PROCESS_DETAILS",
+      args: { target },
+    };
+  }
+
   const serviceListMatch = adminBody.match(/^service\s+list(?:\s+(.+))?$/i);
   if (serviceListMatch) {
     const filter = serviceListMatch[1]?.trim() ?? "";
@@ -542,6 +584,22 @@ function parseAdminCommand(rawCommandPhrase: string): TypedCommand | ParseError 
     return {
       type: "SERVICE_CONTROL",
       args: { action, name },
+    };
+  }
+
+  const serviceDetailsMatch = adminBody.match(/^service\s+details\s+(.+)$/i);
+  if (serviceDetailsMatch) {
+    const name = serviceDetailsMatch[1]?.trim() ?? "";
+    if (!name) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin service details requires a service name",
+      };
+    }
+
+    return {
+      type: "SERVICE_DETAILS",
+      args: { name },
     };
   }
 
@@ -642,10 +700,180 @@ function parseAdminCommand(rawCommandPhrase: string): TypedCommand | ParseError 
     };
   }
 
+  const fileCopyMoveMatch = adminBody.match(/^file\s+(copy|move)\s+(.+?)\s*->\s*(.+)$/i);
+  if (fileCopyMoveMatch) {
+    const action = (fileCopyMoveMatch[1] ?? "").toLowerCase();
+    const source = fileCopyMoveMatch[2]?.trim() ?? "";
+    const destination = fileCopyMoveMatch[3]?.trim() ?? "";
+    if (!source || !destination) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file copy/move requires source and destination separated by ->",
+      };
+    }
+
+    return {
+      type: action === "move" ? "FILE_MOVE" : "FILE_COPY",
+      args: { source, destination },
+    };
+  }
+
+  const fileExistsMatch = adminBody.match(/^file\s+exists\s+(.+)$/i);
+  if (fileExistsMatch) {
+    const path = fileExistsMatch[1]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file exists requires a path",
+      };
+    }
+
+    return {
+      type: "FILE_EXISTS",
+      args: { path },
+    };
+  }
+
+  const fileHashMatch = adminBody.match(/^file\s+hash(?:\s+(sha1|sha256|sha384|sha512|md5))?\s+(.+)$/i);
+  if (fileHashMatch) {
+    const algorithm = (fileHashMatch[1] ?? "sha256").toLowerCase();
+    const path = fileHashMatch[2]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file hash requires a path",
+      };
+    }
+
+    return {
+      type: "FILE_HASH",
+      args: { path, algorithm },
+    };
+  }
+
+  const fileTailMatch = adminBody.match(/^file\s+tail\s+(.+?)(?:\s+(\d+))?$/i);
+  if (fileTailMatch) {
+    const path = fileTailMatch[1]?.trim() ?? "";
+    if (!path) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin file tail requires a path",
+      };
+    }
+
+    const rawLines = fileTailMatch[2];
+    let lines: number | null = null;
+    if (rawLines) {
+      lines = Number.parseInt(rawLines, 10);
+      if (!Number.isFinite(lines) || lines < 1 || lines > MAX_ADMIN_TAIL_LINES) {
+        return {
+          code: "MALFORMED_ARGUMENT",
+          message: `admin file tail lines must be between 1 and ${MAX_ADMIN_TAIL_LINES}`,
+        };
+      }
+    }
+
+    return {
+      type: "FILE_TAIL",
+      args: lines ? { path, lines } : { path },
+    };
+  }
+
+  const networkInfoMatch = adminBody.match(/^network\s+info$/i);
+  if (networkInfoMatch) {
+    return buildNoArgCommand("NETWORK_INFO");
+  }
+
+  const networkFlushMatch = adminBody.match(/^network\s+flushdns$/i);
+  if (networkFlushMatch) {
+    return buildNoArgCommand("NETWORK_FLUSH_DNS");
+  }
+
+  const networkTestMatch = adminBody.match(/^network\s+test\s+([^\s]+)(?:\s+(\d{1,5}))?$/i);
+  if (networkTestMatch) {
+    const host = networkTestMatch[1]?.trim() ?? "";
+    if (!host) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin network test requires a host",
+      };
+    }
+
+    const rawPort = networkTestMatch[2];
+    let port: number | null = null;
+    if (rawPort) {
+      port = Number.parseInt(rawPort, 10);
+      if (!Number.isFinite(port) || port < 1 || port > MAX_NETWORK_TEST_PORT) {
+        return {
+          code: "MALFORMED_ARGUMENT",
+          message: `admin network test port must be between 1 and ${MAX_NETWORK_TEST_PORT}`,
+        };
+      }
+    }
+
+    return {
+      type: "NETWORK_TEST",
+      args: port ? { host, port } : { host },
+    };
+  }
+
+  const eventLogMatch = adminBody.match(/^event\s+log\s+(.+?)(?:\s+limit\s+(\d+))?$/i);
+  if (eventLogMatch) {
+    const log = eventLogMatch[1]?.trim() ?? "";
+    if (!log) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin event log requires a log name",
+      };
+    }
+
+    const rawLimit = eventLogMatch[2];
+    let limit: number | null = null;
+    if (rawLimit) {
+      limit = Number.parseInt(rawLimit, 10);
+      if (!Number.isFinite(limit) || limit < 1 || limit > MAX_ADMIN_EVENT_LOG_LIMIT) {
+        return {
+          code: "MALFORMED_ARGUMENT",
+          message: `admin event log limit must be between 1 and ${MAX_ADMIN_EVENT_LOG_LIMIT}`,
+        };
+      }
+    }
+
+    return {
+      type: "EVENT_LOG_QUERY",
+      args: limit ? { log, limit } : { log },
+    };
+  }
+
+  const envListMatch = adminBody.match(/^env\s+list(?:\s+(.+))?$/i);
+  if (envListMatch) {
+    const prefix = envListMatch[1]?.trim() ?? "";
+    return {
+      type: "ENV_LIST",
+      args: prefix ? { prefix } : {},
+    };
+  }
+
+  const envGetMatch = adminBody.match(/^env\s+get\s+(.+)$/i);
+  if (envGetMatch) {
+    const key = envGetMatch[1]?.trim() ?? "";
+    if (!key) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: "admin env get requires a variable name",
+      };
+    }
+
+    return {
+      type: "ENV_GET",
+      args: { key },
+    };
+  }
+
   return {
     code: "UNKNOWN_COMMAND",
     message:
-      "Unknown admin command. Use: admin cmd|ps|process list|process kill|service list|service start|service stop|service restart|file read|file list|file write <path> :: <text>|file append <path> :: <text>|file delete|file mkdir|system info",
+      "Unknown admin command. Use: admin cmd|ps|process list|process kill|process start|process details|service list|service start|service stop|service restart|service details|file read|file list|file write <path> :: <text>|file append <path> :: <text>|file copy <source> -> <destination>|file move <source> -> <destination>|file exists|file hash [sha256|sha1|sha384|sha512|md5] <path>|file tail <path> [lines]|file delete|file mkdir|network info|network test <host> [port]|network flushdns|event log <name> [limit <n>]|env list [prefix]|env get <key>|system info",
   };
 }
 

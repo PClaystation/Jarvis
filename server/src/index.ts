@@ -7,6 +7,7 @@ import { EventHub } from "./events/eventHub";
 import { DeviceRegistry } from "./realtime/deviceRegistry";
 import { registerRealtime } from "./realtime/realtimeServer";
 import { CommandRouter } from "./router/commandRouter";
+import { QueuedUpdateDispatcher } from "./update/queuedUpdateDispatcher";
 import { log } from "./utils/logger";
 
 function normalizeOrigin(value: string): string {
@@ -163,6 +164,13 @@ async function main(): Promise<void> {
   const registry = new DeviceRegistry();
   const router = new CommandRouter(registry, config.commandTimeoutMs, config.maxPendingCommands);
   const eventHub = new EventHub();
+  const queuedUpdateDispatcher = new QueuedUpdateDispatcher({
+    db,
+    eventHub,
+    registry,
+    router,
+    updateCommandTimeoutMs: config.updateCommandTimeoutMs,
+  });
 
   const server = fastify({
     logger: false,
@@ -216,6 +224,7 @@ async function main(): Promise<void> {
     registry,
     router,
     eventHub,
+    queuedUpdateDispatcher,
     wsAuthTimeoutMs: config.wsAuthTimeoutMs,
     wsPingIntervalMs: config.wsPingIntervalMs,
     wsMaxMessageBytes: config.wsMaxMessageBytes,

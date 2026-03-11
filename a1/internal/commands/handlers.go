@@ -26,6 +26,8 @@ const maxAdminResultLength = 900
 const maxAdminFileReadBytes = 16 * 1024
 const maxAdminFileWriteBytes = 128 * 1024
 const maxAdminListEntries = 120
+const maxAdminTailLines = 200
+const maxEventLogEntries = 25
 
 var openAppTargets = map[string]string{
 	"spotify":      "spotify:",
@@ -52,6 +54,7 @@ var openAppTargets = map[string]string{
 
 func Capabilities() []string {
 	return []string{
+		"profile_a",
 		"media_control",
 		"notifications",
 		"clipboard_control",
@@ -67,6 +70,10 @@ func Capabilities() []string {
 		"service_control",
 		"filesystem_control",
 		"system_info",
+		"network_control",
+		"event_log_access",
+		"environment_control",
+		"admin_profile_a1",
 	}
 }
 
@@ -347,6 +354,34 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.OK = true
 		result.Message = output
 		return result
+	case "PROCESS_START":
+		commandText, err := readStringArg(command.Args, "command")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := startProcess(commandText)
+		if err != nil {
+			return handleErr(err, "PROCESS_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "PROCESS_DETAILS":
+		target, err := readStringArg(command.Args, "target")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := describeProcess(target)
+		if err != nil {
+			return handleErr(err, "PROCESS_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
 	case "SERVICE_LIST":
 		filter, err := readOptionalStringArg(command.Args, "filter", "")
 		if err != nil {
@@ -373,6 +408,20 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		}
 
 		output, err := controlService(action, name)
+		if err != nil {
+			return handleErr(err, "SERVICE_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "SERVICE_DETAILS":
+		name, err := readStringArg(command.Args, "name")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := describeService(name)
 		if err != nil {
 			return handleErr(err, "SERVICE_FAILED")
 		}
@@ -437,6 +486,96 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.OK = true
 		result.Message = output
 		return result
+	case "FILE_COPY":
+		source, err := readStringArg(command.Args, "source")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		destination, err := readStringArg(command.Args, "destination")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := copyPath(source, destination)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_MOVE":
+		source, err := readStringArg(command.Args, "source")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		destination, err := readStringArg(command.Args, "destination")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := movePath(source, destination)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_EXISTS":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := pathExists(path)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_HASH":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		algorithm, err := readOptionalStringArg(command.Args, "algorithm", "sha256")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := hashPath(path, algorithm)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "FILE_TAIL":
+		path, err := readStringArg(command.Args, "path")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		lines, err := readOptionalIntArg(command.Args, "lines", 40, 1, maxAdminTailLines)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := tailFile(path, lines)
+		if err != nil {
+			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
 	case "FILE_DELETE":
 		path, err := readStringArg(command.Args, "path")
 		if err != nil {
@@ -474,6 +613,90 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		output, err := makeDir(path)
 		if err != nil {
 			return handleErr(err, "FILESYSTEM_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "NETWORK_INFO":
+		output, err := collectNetworkInfo()
+		if err != nil {
+			return handleErr(err, "NETWORK_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "NETWORK_TEST":
+		host, err := readStringArg(command.Args, "host")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		port, err := readOptionalIntArg(command.Args, "port", 0, 0, 65535)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := testNetworkEndpoint(host, port)
+		if err != nil {
+			return handleErr(err, "NETWORK_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "NETWORK_FLUSH_DNS":
+		output, err := flushDNSCache()
+		if err != nil {
+			return handleErr(err, "NETWORK_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "EVENT_LOG_QUERY":
+		logName, err := readStringArg(command.Args, "log")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		limit, err := readOptionalIntArg(command.Args, "limit", 10, 1, maxEventLogEntries)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := queryEventLog(logName, limit)
+		if err != nil {
+			return handleErr(err, "EVENT_LOG_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "ENV_LIST":
+		prefix, err := readOptionalStringArg(command.Args, "prefix", "")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := listEnvironment(prefix)
+		if err != nil {
+			return handleErr(err, "ENV_FAILED")
+		}
+
+		result.OK = true
+		result.Message = output
+		return result
+	case "ENV_GET":
+		key, err := readStringArg(command.Args, "key")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		output, err := getEnvironment(key)
+		if err != nil {
+			return handleErr(err, "ENV_FAILED")
 		}
 
 		result.OK = true
@@ -855,6 +1078,62 @@ func killProcess(target string, force bool) (string, error) {
 	return clampResultMessage(fmt.Sprintf("Stopped process %s", target)), nil
 }
 
+func startProcess(commandText string) (string, error) {
+	trimmed := strings.TrimSpace(commandText)
+	if trimmed == "" {
+		return "", errors.New("command must not be empty")
+	}
+
+	if len(trimmed) > maxAdminInputLength {
+		return "", fmt.Errorf("command too long (max %d)", maxAdminInputLength)
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("PROCESS_START is supported only on Windows")
+	}
+
+	script := fmt.Sprintf(`
+$commandText = %s
+$proc = Start-Process -FilePath "cmd.exe" -ArgumentList @("/C", $commandText) -WindowStyle Hidden -PassThru
+"Started process id=$($proc.Id)"
+`, psSingleQuoted(trimmed))
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func describeProcess(target string) (string, error) {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" {
+		return "", errors.New("target must not be empty")
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("PROCESS_DETAILS is supported only on Windows")
+	}
+
+	if pid, err := strconv.Atoi(trimmed); err == nil {
+		script := fmt.Sprintf(`
+Get-Process -Id %d -ErrorAction Stop |
+  Select-Object Id,ProcessName,Path,StartTime,CPU,WS,HandleCount,Threads |
+  Format-List |
+  Out-String -Width 4096
+`, pid)
+		cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+		return runWithOutputTimeout(cmd, adminCommandTimeout)
+	}
+
+	escaped := strings.ReplaceAll(trimmed, "'", "''")
+	script := fmt.Sprintf(`
+Get-Process -Name '%s' -ErrorAction Stop |
+  Select-Object -First 8 Id,ProcessName,Path,StartTime,CPU,WS |
+  Format-Table -AutoSize |
+  Out-String -Width 4096
+`, escaped)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
 func listServices(filter string) (string, error) {
 	if runtime.GOOS != "windows" {
 		return "", errors.New("SERVICE_LIST is supported only on Windows")
@@ -913,6 +1192,34 @@ func controlService(action string, name string) (string, error) {
 	}
 
 	return clampResultMessage(fmt.Sprintf("Service %s %s", trimmedName, actionMessage)), nil
+}
+
+func describeService(name string) (string, error) {
+	trimmedName := strings.TrimSpace(name)
+	if trimmedName == "" {
+		return "", errors.New("service name must not be empty")
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("SERVICE_DETAILS is supported only on Windows")
+	}
+
+	script := fmt.Sprintf(`
+$serviceName = %s
+$svc = Get-Service -Name $serviceName -ErrorAction Stop
+$wmi = Get-CimInstance Win32_Service | Where-Object { $_.Name -eq $serviceName } | Select-Object -First 1
+"Name=$($svc.Name)"
+"DisplayName=$($svc.DisplayName)"
+"Status=$($svc.Status)"
+if ($wmi) {
+  "StartType=$($wmi.StartMode)"
+  "PathName=$($wmi.PathName)"
+  "Account=$($wmi.StartName)"
+}
+`, psSingleQuoted(trimmedName))
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
 }
 
 func readFileText(path string, maxBytes int) (string, error) {
@@ -986,6 +1293,120 @@ func writeFileText(path string, text string, appendMode bool) (string, error) {
 	}
 
 	return clampResultMessage(fmt.Sprintf("Wrote %d bytes to %s", len(text), trimmedPath)), nil
+}
+
+func copyPath(source string, destination string) (string, error) {
+	trimmedSource := strings.TrimSpace(source)
+	trimmedDestination := strings.TrimSpace(destination)
+	if trimmedSource == "" || trimmedDestination == "" {
+		return "", errors.New("source and destination must not be empty")
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("FILE_COPY is supported only on Windows")
+	}
+
+	script := fmt.Sprintf("Copy-Item -LiteralPath %s -Destination %s -Recurse -Force -ErrorAction Stop", psSingleQuoted(trimmedSource), psSingleQuoted(trimmedDestination))
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	if _, err := runWithOutputTimeout(cmd, adminCommandTimeout); err != nil {
+		return "", err
+	}
+
+	return clampResultMessage(fmt.Sprintf("Copied %s -> %s", trimmedSource, trimmedDestination)), nil
+}
+
+func movePath(source string, destination string) (string, error) {
+	trimmedSource := strings.TrimSpace(source)
+	trimmedDestination := strings.TrimSpace(destination)
+	if trimmedSource == "" || trimmedDestination == "" {
+		return "", errors.New("source and destination must not be empty")
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("FILE_MOVE is supported only on Windows")
+	}
+
+	script := fmt.Sprintf("Move-Item -LiteralPath %s -Destination %s -Force -ErrorAction Stop", psSingleQuoted(trimmedSource), psSingleQuoted(trimmedDestination))
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	if _, err := runWithOutputTimeout(cmd, adminCommandTimeout); err != nil {
+		return "", err
+	}
+
+	return clampResultMessage(fmt.Sprintf("Moved %s -> %s", trimmedSource, trimmedDestination)), nil
+}
+
+func pathExists(path string) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	info, err := os.Stat(trimmedPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return clampResultMessage(fmt.Sprintf("Path does not exist: %s", trimmedPath)), nil
+		}
+		return "", fmt.Errorf("stat path: %w", err)
+	}
+
+	if info.IsDir() {
+		return clampResultMessage(fmt.Sprintf("Path exists: %s (dir)", trimmedPath)), nil
+	}
+
+	return clampResultMessage(fmt.Sprintf("Path exists: %s (file, %d bytes)", trimmedPath, info.Size())), nil
+}
+
+func hashPath(path string, algorithm string) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	normalizedAlgorithm := strings.ToUpper(strings.TrimSpace(algorithm))
+	if normalizedAlgorithm == "" {
+		normalizedAlgorithm = "SHA256"
+	}
+
+	switch normalizedAlgorithm {
+	case "SHA256", "SHA1", "SHA384", "SHA512", "MD5":
+	default:
+		return "", fmt.Errorf("unsupported hash algorithm: %s", algorithm)
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("FILE_HASH is supported only on Windows")
+	}
+
+	script := fmt.Sprintf(`
+$hash = Get-FileHash -LiteralPath %s -Algorithm %s -ErrorAction Stop
+"algorithm=$($hash.Algorithm)"
+"hash=$($hash.Hash)"
+"path=$($hash.Path)"
+`, psSingleQuoted(trimmedPath), normalizedAlgorithm)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func tailFile(path string, lines int) (string, error) {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return "", errors.New("path must not be empty")
+	}
+
+	if lines < 1 || lines > maxAdminTailLines {
+		return "", fmt.Errorf("lines out of range (1-%d)", maxAdminTailLines)
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("FILE_TAIL is supported only on Windows")
+	}
+
+	script := fmt.Sprintf(`
+Get-Content -LiteralPath %s -Tail %d -ErrorAction Stop |
+  Out-String -Width 4096
+`, psSingleQuoted(trimmedPath), lines)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
 }
 
 func deletePath(path string) (string, error) {
@@ -1082,6 +1503,147 @@ $memGb = [math]::Round($os.TotalVisibleMemorySize / 1MB, 2)
 
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func collectNetworkInfo() (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("NETWORK_INFO is supported only on Windows")
+	}
+
+	script := `
+"ip_config:"
+Get-NetIPConfiguration |
+  Select-Object InterfaceAlias,InterfaceDescription,IPv4Address,IPv6Address,IPv4DefaultGateway |
+  Format-Table -AutoSize
+
+"dns_servers:"
+Get-DnsClientServerAddress |
+  Select-Object InterfaceAlias,AddressFamily,ServerAddresses |
+  Format-Table -AutoSize
+`
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func testNetworkEndpoint(host string, port int) (string, error) {
+	trimmedHost := strings.TrimSpace(host)
+	if trimmedHost == "" {
+		return "", errors.New("host must not be empty")
+	}
+
+	if len(trimmedHost) > 255 {
+		return "", errors.New("host is too long")
+	}
+
+	if port < 0 || port > 65535 {
+		return "", errors.New("port must be between 0 and 65535")
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("NETWORK_TEST is supported only on Windows")
+	}
+
+	script := fmt.Sprintf("$target = %s\n", psSingleQuoted(trimmedHost))
+	if port > 0 {
+		script += fmt.Sprintf(`
+Test-NetConnection -ComputerName $target -Port %d -InformationLevel Detailed |
+  Format-List |
+  Out-String -Width 4096
+`, port)
+	} else {
+		script += `
+Test-NetConnection -ComputerName $target -InformationLevel Detailed |
+  Format-List |
+  Out-String -Width 4096
+`
+	}
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func flushDNSCache() (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", errors.New("NETWORK_FLUSH_DNS is supported only on Windows")
+	}
+
+	cmd := exec.Command("ipconfig", "/flushdns")
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func queryEventLog(logName string, limit int) (string, error) {
+	trimmedLog := strings.TrimSpace(logName)
+	if trimmedLog == "" {
+		return "", errors.New("log must not be empty")
+	}
+
+	if limit < 1 || limit > maxEventLogEntries {
+		return "", fmt.Errorf("limit must be between 1 and %d", maxEventLogEntries)
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("EVENT_LOG_QUERY is supported only on Windows")
+	}
+
+	script := fmt.Sprintf(`
+$logName = %s
+Get-WinEvent -LogName $logName -MaxEvents %d -ErrorAction Stop |
+  Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message |
+  Format-List |
+  Out-String -Width 4096
+`, psSingleQuoted(trimmedLog), limit)
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func listEnvironment(prefix string) (string, error) {
+	normalizedPrefix := strings.TrimSpace(prefix)
+	if len(normalizedPrefix) > 120 {
+		return "", errors.New("prefix too long")
+	}
+
+	if runtime.GOOS != "windows" {
+		return "", errors.New("ENV_LIST is supported only on Windows")
+	}
+
+	filterClause := ""
+	if normalizedPrefix != "" {
+		filterClause = fmt.Sprintf(" | Where-Object { $_.Name -like %s }", psSingleQuoted(normalizedPrefix+"*"))
+	}
+
+	script := fmt.Sprintf(`
+Get-ChildItem Env:%s |
+  Sort-Object Name |
+  Select-Object -First %d Name,Value |
+  Format-Table -AutoSize |
+  Out-String -Width 4096
+`, filterClause, maxAdminListEntries)
+
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
+	return runWithOutputTimeout(cmd, adminCommandTimeout)
+}
+
+func getEnvironment(key string) (string, error) {
+	trimmedKey := strings.TrimSpace(key)
+	if trimmedKey == "" {
+		return "", errors.New("key must not be empty")
+	}
+
+	if len(trimmedKey) > 120 {
+		return "", errors.New("key too long")
+	}
+
+	value, ok := os.LookupEnv(trimmedKey)
+	if !ok {
+		return clampResultMessage(fmt.Sprintf("Environment variable not set: %s", trimmedKey)), nil
+	}
+
+	return clampResultMessage(fmt.Sprintf("%s=%s", trimmedKey, value)), nil
+}
+
+func psSingleQuoted(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func clampResultMessage(message string) string {
