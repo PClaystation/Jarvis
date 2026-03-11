@@ -12,6 +12,8 @@ server/data/
 # Go
 agent/bin/
 agent/*.exe
+agent/dist/
+*/dist/*.exe
 
 # Editor/OS
 .DS_Store

@@ -461,6 +461,21 @@ Default behavior:
 - remote update requires HTTPS URL (default) + SHA256 verification on agent
 - normal user context for main agent
 
+## Automation (Self-Maintaining)
+
+This repo includes GitHub automation for CI, security scanning, dependency updates, release artifacts, and operational health checks:
+
+- `.github/workflows/ci.yml`
+- `.github/dependabot.yml`
+- `.github/workflows/dependabot-auto-merge.yml`
+- `.github/workflows/security.yml`
+- `.github/workflows/release-agents.yml`
+- `.github/workflows/ops-health.yml`
+
+Configuration details (required variables/secrets, branch protection recommendations, optional code-signing) are documented in:
+
+- [docs/automation.md](docs/automation.md)
+
 ## Known Gaps / Next Milestones
 
 - signed package verification (phase 2 hardening)

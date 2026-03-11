@@ -1,0 +1,112 @@
+name: Ops Health Check
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ops-health
+  cancel-in-progress: true
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    env:
+      HEALTH_URL: ${{ vars.CORDYCEPS_HEALTH_URL }}
+      HEALTH_TOKEN: ${{ secrets.CORDYCEPS_HEALTH_BEARER_TOKEN }}
+      MIN_DEVICES_ONLINE: ${{ vars.CORDYCEPS_MIN_DEVICES_ONLINE }}
+      MAX_PENDING_COMMANDS: ${{ vars.CORDYCEPS_MAX_PENDING_COMMANDS }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.CORDYCEPS_DISCORD_WEBHOOK_URL }}
+      SLACK_WEBHOOK_URL: ${{ secrets.CORDYCEPS_SLACK_WEBHOOK_URL }}
+    steps:
+      - name: Run health check
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HEALTH_URL:-}" ]; then
+            echo "::warning::CORDYCEPS_HEALTH_URL repository variable is not set. Skipping health check."
+            echo "status=skipped" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          auth_header=()
+          if [ -n "${HEALTH_TOKEN:-}" ]; then
+            auth_header=(-H "Authorization: Bearer ${HEALTH_TOKEN}")
+          fi
+
+          tmp_body="$(mktemp)"
+          http_code="$(curl -sS -o "$tmp_body" -w '%{http_code}' "${auth_header[@]}" "$HEALTH_URL")"
+          body="$(cat "$tmp_body")"
+          rm -f "$tmp_body"
+
+          echo "HTTP ${http_code}"
+          echo "Raw response: $body"
+
+          if [ "$http_code" != "200" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "reason=Health endpoint returned HTTP $http_code" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          ok="$(jq -r '.ok // false' <<<"$body")"
+          devices_online="$(jq -r '.devices_online // 0' <<<"$body")"
+          pending_commands="$(jq -r '.pending_commands // 0' <<<"$body")"
+          uptime_seconds="$(jq -r '.uptime_seconds // 0' <<<"$body")"
+
+          min_online="${MIN_DEVICES_ONLINE:-1}"
+          max_pending="${MAX_PENDING_COMMANDS:-100}"
+
+          if [ "$ok" != "true" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "reason=Health endpoint reported ok=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if [ "$devices_online" -lt "$min_online" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "reason=devices_online=$devices_online below threshold=$min_online" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          if [ "$pending_commands" -gt "$max_pending" ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "reason=pending_commands=$pending_commands above threshold=$max_pending" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          {
+            echo "## Cordyceps Health"
+            echo ""
+            echo "- url: \\`${HEALTH_URL}\\`"
+            echo "- uptime_seconds: ${uptime_seconds}"
+            echo "- devices_online: ${devices_online}"
+            echo "- pending_commands: ${pending_commands}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+
+      - name: Send Discord alert on failure
+        if: failure() && env.DISCORD_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          reason="${{ steps.check.outputs.reason }}"
+          payload="$(jq -nc --arg text "Cordyceps health check failed: ${reason}. Run: ${run_url}" '{content: $text}')"
+          curl -sS -X POST -H "Content-Type: application/json" -d "$payload" "$DISCORD_WEBHOOK_URL" >/dev/null
+
+      - name: Send Slack alert on failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          reason="${{ steps.check.outputs.reason }}"
+          payload="$(jq -nc --arg text "Cordyceps health check failed: ${reason}. Run: ${run_url}" '{text: $text}')"
+          curl -sS -X POST -H "Content-Type: application/json" -d "$payload" "$SLACK_WEBHOOK_URL" >/dev/null

@@ -1,0 +1,168 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/server"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - server
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      npm-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: gomod
+    directory: "/agent"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:15"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - agent
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go-agent-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: gomod
+    directory: "/t1"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:20"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - t1
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go-t1-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: gomod
+    directory: "/s1"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:25"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - s1
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go-s1-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: gomod
+    directory: "/e1"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - e1
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go-e1-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: gomod
+    directory: "/se1"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:35"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - se1
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go-se1-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: gomod
+    directory: "/a1"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:40"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - go
+      - a1
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      go-a1-patch-minor:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+          - minor
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:45"
+      timezone: "Europe/Stockholm"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "chore(actions)"
