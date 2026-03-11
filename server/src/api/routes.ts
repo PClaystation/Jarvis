@@ -49,6 +49,11 @@ interface UpdateRequestBody {
   size_bytes?: unknown;
 }
 
+interface PreparedDesignationChange {
+  currentDeviceId: string;
+  nextDeviceId: string;
+}
+
 interface RenameDeviceBody {
   display_name?: string;
 }
@@ -289,6 +294,61 @@ function normalizeOptionalSizeBytes(value: unknown, maxBytes: number): number | 
   }
 
   return parsed;
+}
+
+function inferDesignationPrefixFromPackageUrl(packageUrl: string): string | null {
+  const value = packageUrl.trim().toLowerCase();
+  if (!value) {
+    return null;
+  }
+
+  if (value.includes("e1-agent")) {
+    return "e";
+  }
+
+  if (value.includes("t1-agent")) {
+    return "t";
+  }
+
+  if (value.includes("a1-agent")) {
+    return "a";
+  }
+
+  if (value.includes("cordyceps-agent") || value.includes("jarvis-agent")) {
+    return "m";
+  }
+
+  return null;
+}
+
+function deviceIdPrefix(deviceId: string): string {
+  const match = deviceId.trim().toLowerCase().match(/^[a-z]+/);
+  return match ? match[0].slice(0, 1) : "";
+}
+
+function prepareDesignationChange(
+  db: Database,
+  deviceId: string,
+  nextPrefix: string | null,
+): PreparedDesignationChange | null {
+  if (!nextPrefix) {
+    return null;
+  }
+
+  const currentPrefix = deviceIdPrefix(deviceId);
+  if (!currentPrefix || currentPrefix === nextPrefix) {
+    return null;
+  }
+
+  const nextDeviceId = db.allocateNextDeviceId(nextPrefix);
+  if (!db.cloneDeviceWithNewId(deviceId, nextDeviceId)) {
+    return null;
+  }
+
+  return {
+    currentDeviceId: deviceId,
+    nextDeviceId,
+  };
 }
 
 function makeUpdateRawText(target: string, version: string, packageUrl: string): string {
@@ -599,6 +659,8 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       package_size_bytes: packageSizeBytes ?? null,
     });
 
+    const nextDesignationPrefix = inferDesignationPrefixFromPackageUrl(resolvedPackageUrl);
+
     const targetDeviceIds = target === "all" ? deps.registry.listOnlineDeviceIds() : [target];
     if (targetDeviceIds.length === 0) {
       reply.code(409).send({
@@ -610,9 +672,17 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
+    const preparedDesignationChanges = new Map<string, PreparedDesignationChange>();
+    const rollbackPreparedDesignationChanges = (): void => {
+      for (const designationChange of preparedDesignationChanges.values()) {
+        deps.db.deleteDevice(designationChange.nextDeviceId);
+      }
+    };
+
     for (const deviceId of targetDeviceIds) {
       const knownDevice = deps.db.getDevice(deviceId) ?? deps.registry.get(deviceId);
       if (!knownDevice) {
+        rollbackPreparedDesignationChanges();
         reply.code(404).send({
           ok: false,
           request_id: requestId,
@@ -624,6 +694,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
       const connected = deps.registry.get(deviceId);
       if (!connected) {
+        rollbackPreparedDesignationChanges();
         reply.code(409).send({
           ok: false,
           request_id: requestId,
@@ -635,6 +706,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
       const hasUpdater = Array.isArray(connected.capabilities) && connected.capabilities.includes("updater");
       if (!hasUpdater) {
+        rollbackPreparedDesignationChanges();
         reply.code(409).send({
           ok: false,
           request_id: requestId,
@@ -642,6 +714,11 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           error_code: "UPDATER_NOT_SUPPORTED",
         });
         return;
+      }
+
+      const designationChange = prepareDesignationChange(deps.db, deviceId, nextDesignationPrefix);
+      if (designationChange) {
+        preparedDesignationChanges.set(deviceId, designationChange);
       }
 
       deps.db.insertCommandLog({
@@ -677,10 +754,21 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     if (target !== "all") {
       const deviceId = targetDeviceIds[0];
       try {
+        const designationChange = preparedDesignationChanges.get(deviceId);
+        const commandWithDesignationChange = designationChange
+          ? {
+              ...command,
+              args: {
+                ...command.args,
+                next_device_id: designationChange.nextDeviceId,
+              },
+            }
+          : command;
+
         const result = await deps.router.dispatchToDevice({
           requestId,
           deviceId,
-          command,
+          command: commandWithDesignationChange,
           timeoutMs: deps.config.updateCommandTimeoutMs,
         });
 
@@ -690,6 +778,14 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           resultMessage: result.message,
           errorCode: result.error_code,
         });
+
+        if (designationChange) {
+          if (result.ok) {
+            deps.db.deleteDevice(designationChange.currentDeviceId);
+          } else {
+            deps.db.deleteDevice(designationChange.nextDeviceId);
+          }
+        }
 
         reply.send({
           ok: result.ok,
@@ -702,10 +798,17 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           sha256,
           hash_source: hashSource,
           package_size_bytes: packageSizeBytes ?? null,
+          designation_change: designationChange
+            ? {
+                previous_device_id: designationChange.currentDeviceId,
+                next_device_id: designationChange.nextDeviceId,
+              }
+            : null,
           result,
         });
       } catch (error) {
         const dispatch = parseDispatchError(error);
+        const designationChange = preparedDesignationChanges.get(deviceId);
 
         deps.db.completeCommandLog({
           id: makeLogId(requestId, deviceId),
@@ -713,6 +816,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           resultMessage: dispatch.message,
           errorCode: dispatch.code,
         });
+
+        if (designationChange) {
+          deps.db.deleteDevice(designationChange.nextDeviceId);
+        }
 
         reply.code(dispatch.httpStatus).send({
           ok: false,
@@ -732,12 +839,39 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
-    const results = await deps.router.dispatchToMany({
-      requestId,
-      deviceIds: targetDeviceIds,
-      command,
-      timeoutMs: deps.config.updateCommandTimeoutMs,
-    });
+    const results = await Promise.all(
+      targetDeviceIds.map(async (deviceId) => {
+        const designationChange = preparedDesignationChanges.get(deviceId);
+        const commandForDevice = designationChange
+          ? {
+              ...command,
+              args: {
+                ...command.args,
+                next_device_id: designationChange.nextDeviceId,
+              },
+            }
+          : command;
+
+        try {
+          return await deps.router.dispatchToDevice({
+            requestId,
+            deviceId,
+            command: commandForDevice,
+            timeoutMs: deps.config.updateCommandTimeoutMs,
+          });
+        } catch (error) {
+          const dispatch = parseDispatchError(error);
+          return {
+            request_id: requestId,
+            device_id: deviceId,
+            ok: false,
+            message: dispatch.message,
+            error_code: dispatch.code,
+            completed_at: new Date().toISOString(),
+          };
+        }
+      }),
+    );
 
     for (const result of results) {
       deps.db.completeCommandLog({
@@ -746,6 +880,15 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         resultMessage: result.message,
         errorCode: result.error_code,
       });
+
+      const designationChange = preparedDesignationChanges.get(result.device_id);
+      if (designationChange) {
+        if (result.ok) {
+          deps.db.deleteDevice(designationChange.currentDeviceId);
+        } else {
+          deps.db.deleteDevice(designationChange.nextDeviceId);
+        }
+      }
     }
 
     const okCount = results.filter((result) => result.ok).length;
@@ -767,6 +910,12 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         ok: result.ok,
         message: result.message,
         error_code: result.error_code,
+        designation_change: preparedDesignationChanges.has(result.device_id)
+          ? {
+              previous_device_id: preparedDesignationChanges.get(result.device_id)?.currentDeviceId,
+              next_device_id: preparedDesignationChanges.get(result.device_id)?.nextDeviceId,
+            }
+          : null,
       })),
     });
   });

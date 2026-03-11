@@ -3,6 +3,7 @@ package updater
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -34,10 +35,20 @@ type Result struct {
 }
 
 type updateRequest struct {
-	Version   string
-	URL       string
-	SHA256    string
-	SizeBytes int64
+	Version      string
+	URL          string
+	SHA256       string
+	SizeBytes    int64
+	NextDeviceID string
+}
+
+type persistedConfig struct {
+	DeviceID         string `json:"device_id"`
+	DeviceToken      string `json:"device_token"`
+	ServerBaseURL    string `json:"server_base_url"`
+	WSURL            string `json:"ws_url"`
+	HeartbeatSeconds int    `json:"heartbeat_seconds"`
+	Version          string `json:"version"`
 }
 
 func Apply(args map[string]any, executablePath string, cfgPath string) (Result, error) {
@@ -82,7 +93,16 @@ func Apply(args map[string]any, executablePath string, cfgPath string) (Result, 
 		return Result{}, err
 	}
 
-	scriptPath, err := writeUpdaterScript(executablePath, stagePath, cfgPath, request.Version)
+	launchConfigPath := cfgPath
+	if strings.TrimSpace(request.NextDeviceID) != "" {
+		launchConfigPath, err = prepareMigratedConfig(cfgPath, request.NextDeviceID, request.Version)
+		if err != nil {
+			_ = os.Remove(stagePath)
+			return Result{}, fmt.Errorf("prepare migrated config: %w", err)
+		}
+	}
+
+	scriptPath, err := writeUpdaterScript(executablePath, stagePath, cfgPath, launchConfigPath, request.Version)
 	if err != nil {
 		_ = os.Remove(stagePath)
 		return Result{}, fmt.Errorf("create updater helper: %w", err)
@@ -95,8 +115,12 @@ func Apply(args map[string]any, executablePath string, cfgPath string) (Result, 
 	}
 
 	restartRequired = true
+	message := fmt.Sprintf("Update %s staged. Agent is restarting now.", request.Version)
+	if strings.TrimSpace(request.NextDeviceID) != "" {
+		message = fmt.Sprintf("Update %s staged. Agent is restarting now as %s.", request.Version, request.NextDeviceID)
+	}
 	return Result{
-		Message:         fmt.Sprintf("Update %s staged. Agent is restarting now.", request.Version),
+		Message:         message,
 		RestartRequired: true,
 	}, nil
 }
@@ -138,11 +162,17 @@ func parseRequest(args map[string]any) (updateRequest, error) {
 		return updateRequest{}, err
 	}
 
+	nextDeviceID, err := readOptionalStringArg(args, "next_device_id")
+	if err != nil {
+		return updateRequest{}, err
+	}
+
 	return updateRequest{
-		Version:   version,
-		URL:       parsedURL.String(),
-		SHA256:    shaValue,
-		SizeBytes: sizeBytes,
+		Version:      version,
+		URL:          parsedURL.String(),
+		SHA256:       shaValue,
+		SizeBytes:    sizeBytes,
+		NextDeviceID: nextDeviceID,
 	}, nil
 }
 
@@ -275,7 +305,7 @@ func verifyWindowsExecutable(path string) error {
 	return nil
 }
 
-func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, version string) (string, error) {
+func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, launchConfigPath string, version string) (string, error) {
 	scriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("a1-agent-updater-%d.cmd", time.Now().UTC().UnixNano()))
 
 	escape := func(value string) string {
@@ -292,6 +322,7 @@ func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, ve
 		fmt.Sprintf("set \"TARGET_DIR=%s\"", escape(filepath.Dir(targetPath))),
 		fmt.Sprintf("set \"STAGED=%s\"", escape(stagedPath)),
 		fmt.Sprintf("set \"CONFIG=%s\"", escape(cfgPath)),
+		fmt.Sprintf("set \"LAUNCH_CONFIG=%s\"", escape(launchConfigPath)),
 		fmt.Sprintf("set \"VERSION=%s\"", escape(version)),
 		"set \"BACKUP=%TARGET%.bak\"",
 		"if exist \"%BACKUP%\" del /f /q \"%BACKUP%\" >nul 2>&1",
@@ -307,7 +338,7 @@ func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, ve
 		":swapped",
 		"move /Y \"%STAGED%\" \"%TARGET%\" >nul 2>&1",
 		"if errorlevel 1 goto rollback",
-		"start \"\" /D \"%TARGET_DIR%\" /B \"%TARGET%\" --config \"%CONFIG%\" --version \"%VERSION%\"",
+		"start \"\" /D \"%TARGET_DIR%\" /B \"%TARGET%\" --config \"%LAUNCH_CONFIG%\" --version \"%VERSION%\"",
 		"if errorlevel 1 goto rollback",
 		"del /f /q \"%BACKUP%\" >nul 2>&1",
 		"del /f /q \"%~f0\" >nul 2>&1",
@@ -326,6 +357,95 @@ func writeUpdaterScript(targetPath string, stagedPath string, cfgPath string, ve
 	}
 
 	return scriptPath, nil
+}
+
+func prepareMigratedConfig(currentConfigPath string, nextDeviceID string, version string) (string, error) {
+	configPath, err := configPathForDeviceID(nextDeviceID)
+	if err != nil {
+		return "", err
+	}
+
+	payload, err := os.ReadFile(currentConfigPath)
+	if err != nil {
+		return "", fmt.Errorf("read current config: %w", err)
+	}
+
+	var cfg persistedConfig
+	if err := json.Unmarshal(payload, &cfg); err != nil {
+		return "", fmt.Errorf("parse current config: %w", err)
+	}
+
+	cfg.DeviceID = strings.TrimSpace(nextDeviceID)
+	if strings.TrimSpace(version) != "" {
+		cfg.Version = strings.TrimSpace(version)
+	}
+	if cfg.HeartbeatSeconds <= 0 {
+		cfg.HeartbeatSeconds = 60
+	}
+
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		return "", fmt.Errorf("create config dir: %w", err)
+	}
+
+	serialized, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("serialize migrated config: %w", err)
+	}
+
+	tempPath := configPath + ".tmp"
+	if err := os.WriteFile(tempPath, serialized, 0o600); err != nil {
+		return "", fmt.Errorf("write migrated config: %w", err)
+	}
+
+	if err := os.Rename(tempPath, configPath); err != nil {
+		_ = os.Remove(tempPath)
+		return "", fmt.Errorf("activate migrated config: %w", err)
+	}
+
+	return configPath, nil
+}
+
+func configPathForDeviceID(deviceID string) (string, error) {
+	prefix := leadingLetter(deviceID)
+	appData := strings.TrimSpace(os.Getenv("APPDATA"))
+	if appData != "" {
+		switch prefix {
+		case "t":
+			return filepath.Join(appData, "T1Agent", "config.json"), nil
+		case "e":
+			return filepath.Join(appData, "E1Agent", "config.json"), nil
+		case "a":
+			return filepath.Join(appData, "A1Agent", "config.json"), nil
+		default:
+			return filepath.Join(appData, "CordycepsAgent", "config.json"), nil
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	switch prefix {
+	case "t":
+		return filepath.Join(homeDir, ".t1-agent", "config.json"), nil
+	case "e":
+		return filepath.Join(homeDir, ".e1-agent", "config.json"), nil
+	case "a":
+		return filepath.Join(homeDir, ".a1-agent", "config.json"), nil
+	default:
+		return filepath.Join(homeDir, ".cordyceps-agent", "config.json"), nil
+	}
+}
+
+func leadingLetter(value string) string {
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		if r >= 'a' && r <= 'z' {
+			return string(r)
+		}
+	}
+
+	return ""
 }
 
 func launchUpdaterScript(scriptPath string) error {
@@ -368,6 +488,29 @@ func readStringArg(args map[string]any, key string) (string, error) {
 	asString = strings.TrimSpace(asString)
 	if asString == "" {
 		return "", fmt.Errorf("arg must not be empty: %s", key)
+	}
+
+	return asString, nil
+}
+
+func readOptionalStringArg(args map[string]any, key string) (string, error) {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return "", nil
+	}
+
+	asString, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("arg must be string: %s", key)
+	}
+
+	asString = strings.TrimSpace(asString)
+	if asString == "" {
+		return "", nil
+	}
+
+	if len(asString) > 32 {
+		return "", fmt.Errorf("arg too long: %s", key)
 	}
 
 	return asString, nil

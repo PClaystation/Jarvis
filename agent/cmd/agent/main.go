@@ -97,7 +97,7 @@ func main() {
 	cfgPath := strings.TrimSpace(configPathFlag)
 	if cfgPath == "" {
 		var err error
-		cfgPath, err = config.DefaultConfigPath()
+		cfgPath, err = config.ResolveConfigPath()
 		if err != nil {
 			log.Fatalf("resolve config path: %v", err)
 		}

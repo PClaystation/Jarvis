@@ -33,6 +33,7 @@ Phone-driven remote command system:
   - `NOTIFY`
   - `CLIPBOARD_SET`
   - `SYSTEM_SLEEP`, `SYSTEM_DISPLAY_OFF`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`
+  - `AGENT_REMOVE` (local host must approve via multi-step prompt)
   - `EMERGENCY_LOCKDOWN` (implemented in `e1` agent family only)
   - Admin-only command family (implemented in `a1` agent family):
     - `ADMIN_EXEC_CMD`, `ADMIN_EXEC_POWERSHELL`
@@ -74,6 +75,7 @@ Examples:
 - `m1 open terminal`
 - `m1 open powershell`
 - `m1 restart`
+- `m1 remove agent confirm confirm`
 - `e1 panic confirm`
 - `a1 admin cmd whoami`
 - `a1 admin ps Get-Process | Select-Object -First 5`
@@ -93,6 +95,7 @@ Notes:
 - `volume up/down`, `next`, and `previous` support optional numeric repeats (`1-20`)
 - app launch verbs supported: `open`, `launch`, `start`
 - emergency command requires explicit confirmation (`panic confirm`, `lockdown confirm`, or `emergency confirm`)
+- agent removal requires explicit remote confirmation (`remove agent confirm confirm`) and then local host approval on the target PC
 - admin commands must use `admin ...` and are dispatched only to devices that advertise `admin_ops` capability (A1 family)
 
 ## Server Setup

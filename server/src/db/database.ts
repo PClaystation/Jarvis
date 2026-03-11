@@ -247,6 +247,118 @@ export class Database {
     return result.changes > 0;
   }
 
+  public cloneDeviceWithNewId(currentDeviceId: string, nextDeviceId: string): boolean {
+    if (currentDeviceId === nextDeviceId) {
+      return true;
+    }
+
+    const now = new Date().toISOString();
+    const transaction = this.db.transaction((sourceId: string, targetId: string) => {
+      const source = this.db
+        .prepare(
+          `
+            SELECT
+              device_id,
+              display_name,
+              auth_token_hash,
+              status,
+              last_seen,
+              version,
+              hostname,
+              username,
+              capabilities_json,
+              created_at,
+              updated_at
+            FROM devices
+            WHERE device_id = ?
+          `,
+        )
+        .get(sourceId) as
+        | {
+            device_id: string;
+            display_name: string | null;
+            auth_token_hash: string;
+            status: string;
+            last_seen: string;
+            version: string | null;
+            hostname: string | null;
+            username: string | null;
+            capabilities_json: string | null;
+            created_at: string;
+            updated_at: string;
+          }
+        | undefined;
+
+      if (!source) {
+        return false;
+      }
+
+      const existingTarget = this.db
+        .prepare("SELECT 1 FROM devices WHERE device_id = ?")
+        .get(targetId) as { 1: number } | undefined;
+      if (existingTarget) {
+        return false;
+      }
+
+      const displayName =
+        source.display_name && source.display_name.trim().toLowerCase() === source.device_id.toLowerCase()
+          ? targetId
+          : source.display_name;
+
+      const insertResult = this.db
+        .prepare(
+          `
+            INSERT INTO devices (
+              device_id,
+              display_name,
+              auth_token_hash,
+              status,
+              last_seen,
+              version,
+              hostname,
+              username,
+              capabilities_json,
+              created_at,
+              updated_at
+            ) VALUES (
+              @device_id,
+              @display_name,
+              @auth_token_hash,
+              'offline',
+              @last_seen,
+              @version,
+              @hostname,
+              @username,
+              @capabilities_json,
+              @created_at,
+              @updated_at
+            )
+          `,
+        )
+        .run({
+          device_id: targetId,
+          display_name: displayName,
+          auth_token_hash: source.auth_token_hash,
+          last_seen: source.last_seen,
+          version: source.version,
+          hostname: source.hostname,
+          username: source.username,
+          capabilities_json: source.capabilities_json ?? "[]",
+          created_at: source.created_at,
+          updated_at: now,
+        });
+
+      return insertResult.changes > 0;
+    });
+
+    return transaction(currentDeviceId, nextDeviceId);
+  }
+
+  public deleteDevice(deviceId: string): boolean {
+    const result = this.db.prepare("DELETE FROM devices WHERE device_id = ?").run(deviceId);
+    return result.changes > 0;
+  }
+
   public markDeviceOnline(input: {
     deviceId: string;
     version?: string;

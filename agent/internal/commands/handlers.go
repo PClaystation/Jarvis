@@ -4,16 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/charliearnerstal/cordyceps/agent/internal/config"
 	"github.com/charliearnerstal/cordyceps/agent/internal/protocol"
 )
 
 const commandTimeout = 8 * time.Second
 const maxClipboardTextLength = 1000
+const removalPromptTimeout = 2 * time.Minute
 
 var openAppTargets = map[string]string{
 	"spotify":      "spotify:",
@@ -63,11 +67,11 @@ func Capabilities() []string {
 
 func Execute(deviceID string, version string, command protocol.CommandEnvelope) (result protocol.ResultMessage) {
 	result = protocol.ResultMessage{
-		Kind:       "result",
-		RequestID:  command.RequestID,
-		DeviceID:   deviceID,
+		Kind:        "result",
+		RequestID:   command.RequestID,
+		DeviceID:    deviceID,
 		CompletedAt: time.Now().UTC().Format(time.RFC3339),
-		Version:    version,
+		Version:     version,
 	}
 
 	defer func() {
@@ -276,6 +280,14 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = "Restart scheduled (5s)"
+		return result
+	case "AGENT_REMOVE":
+		if err := promptAndRemoveAgent(deviceID); err != nil {
+			return handleErr(err, "REMOVE_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Removal approved on host; uninstall scheduled"
 		return result
 	default:
 		return handleErr(fmt.Errorf("unknown command type: %s", command.Type), "UNKNOWN_TYPE")
@@ -532,6 +544,236 @@ func signOut() error {
 	}
 
 	return nil
+}
+
+func promptAndRemoveAgent(deviceID string) error {
+	if runtime.GOOS != "windows" {
+		return errors.New("AGENT_REMOVE is supported only on Windows")
+	}
+
+	executablePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	cleanupScriptPath, err := writeAgentRemovalScript(executablePath, removalConfigPaths())
+	if err != nil {
+		return fmt.Errorf("prepare removal script: %w", err)
+	}
+
+	promptScript := buildRemovalPromptScript(deviceID, cleanupScriptPath)
+	cmd := exec.Command(
+		"powershell",
+		"-NoProfile",
+		"-NonInteractive",
+		"-WindowStyle",
+		"Hidden",
+		"-ExecutionPolicy",
+		"Bypass",
+		"-Command",
+		promptScript,
+	)
+
+	if err := runWithTimeout(cmd, removalPromptTimeout); err != nil {
+		_ = os.Remove(cleanupScriptPath)
+		if err.Error() == "command timed out" {
+			return errors.New("host removal prompt timed out")
+		}
+
+		return errors.New("host user declined removal")
+	}
+
+	return nil
+}
+
+func writeAgentRemovalScript(executablePath string, configPaths []string) (string, error) {
+	tempDir := os.TempDir()
+	scriptPath := filepath.Join(tempDir, fmt.Sprintf("cordyceps-agent-remove-%d.ps1", time.Now().UnixNano()))
+	scriptSelf := psSingleQuoted(scriptPath)
+	exe := psSingleQuoted(executablePath)
+
+	quotedConfigPaths := make([]string, 0, len(configPaths))
+	for _, path := range configPaths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		quotedConfigPaths = append(quotedConfigPaths, psSingleQuoted(path))
+	}
+
+	configPathLiteral := "@()"
+	if len(quotedConfigPaths) > 0 {
+		configPathLiteral = "@(" + strings.Join(quotedConfigPaths, ", ") + ")"
+	}
+
+	script := fmt.Sprintf(`$ErrorActionPreference = "SilentlyContinue"
+$executablePath = %s
+$configPaths = %s
+$scriptPath = %s
+$runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$taskNames = @("JarvisAgent", "CordycepsAgent")
+$runKeyNames = @("JarvisAgent", "CordycepsAgent")
+
+Start-Sleep -Seconds 6
+
+foreach ($taskName in $taskNames) {
+  schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+}
+
+foreach ($runKeyName in $runKeyNames) {
+  Remove-ItemProperty -Path $runKeyPath -Name $runKeyName -ErrorAction SilentlyContinue
+}
+
+Get-Process | Where-Object { $_.Path -eq $executablePath } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
+if (Test-Path -LiteralPath $executablePath) {
+  Remove-Item -LiteralPath $executablePath -Force -ErrorAction SilentlyContinue
+}
+
+foreach ($configPath in $configPaths) {
+  if (-not $configPath) {
+    continue
+  }
+
+  if (Test-Path -LiteralPath $configPath) {
+    Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+  }
+
+  $configDir = Split-Path -Parent $configPath
+  if ($configDir -and (Test-Path -LiteralPath $configDir)) {
+    $remaining = @(Get-ChildItem -LiteralPath $configDir -Force -ErrorAction SilentlyContinue)
+    if ($remaining.Count -eq 0) {
+      Remove-Item -LiteralPath $configDir -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+$installRoot = Split-Path -Parent $executablePath
+if ($installRoot -and (Test-Path -LiteralPath $installRoot)) {
+  $remaining = @(Get-ChildItem -LiteralPath $installRoot -Force -ErrorAction SilentlyContinue)
+  if ($remaining.Count -eq 0) {
+    Remove-Item -LiteralPath $installRoot -Force -ErrorAction SilentlyContinue
+  }
+}
+
+Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+`, exe, configPathLiteral, scriptSelf)
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		return "", err
+	}
+
+	return scriptPath, nil
+}
+
+func buildRemovalPromptScript(deviceID string, cleanupScriptPath string) string {
+	return fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$title = "Cordyceps Agent Removal"
+$deviceId = %s
+$cleanupScriptPath = %s
+$newline = [Environment]::NewLine
+$warningOne = "A remote request asked this computer to remove the Cordyceps agent for device ID '" + $deviceId + "'." + $newline + $newline + "Continue only if you want this agent removed from this Windows user profile."
+$warningTwo = "This will stop remote access, remove startup persistence, and delete the local agent executable and config for this user." + $newline + $newline + "Do you want to continue to the final confirmation?"
+
+$first = [System.Windows.Forms.MessageBox]::Show($warningOne, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+if ($first -ne [System.Windows.Forms.DialogResult]::Yes) {
+  exit 1
+}
+
+$second = [System.Windows.Forms.MessageBox]::Show($warningTwo, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+if ($second -ne [System.Windows.Forms.DialogResult]::Yes) {
+  exit 1
+}
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = $title
+$form.StartPosition = "CenterScreen"
+$form.Size = New-Object System.Drawing.Size(520, 220)
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.TopMost = $true
+
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $false
+$label.Location = New-Object System.Drawing.Point(20, 20)
+$label.Size = New-Object System.Drawing.Size(470, 60)
+$label.Text = "Final confirmation: type REMOVE to approve uninstall on this computer."
+$form.Controls.Add($label)
+
+$textbox = New-Object System.Windows.Forms.TextBox
+$textbox.Location = New-Object System.Drawing.Point(20, 92)
+$textbox.Size = New-Object System.Drawing.Size(470, 24)
+$form.Controls.Add($textbox)
+
+$removeButton = New-Object System.Windows.Forms.Button
+$removeButton.Text = "Remove agent"
+$removeButton.Location = New-Object System.Drawing.Point(292, 132)
+$removeButton.Size = New-Object System.Drawing.Size(120, 32)
+$removeButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+$form.Controls.Add($removeButton)
+
+$cancelButton = New-Object System.Windows.Forms.Button
+$cancelButton.Text = "Cancel"
+$cancelButton.Location = New-Object System.Drawing.Point(160, 132)
+$cancelButton.Size = New-Object System.Drawing.Size(120, 32)
+$cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+$form.Controls.Add($cancelButton)
+
+$form.AcceptButton = $removeButton
+$form.CancelButton = $cancelButton
+
+$dialogResult = $form.ShowDialog()
+if ($dialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
+  exit 1
+}
+
+if ($textbox.Text.Trim().ToUpperInvariant() -ne "REMOVE") {
+  [System.Windows.Forms.MessageBox]::Show("Removal canceled because the confirmation text did not match REMOVE.", $title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+  exit 1
+}
+
+Start-Process -WindowStyle Hidden -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $cleanupScriptPath) | Out-Null
+exit 0
+`, psSingleQuoted(deviceID), psSingleQuoted(cleanupScriptPath))
+}
+
+func removalConfigPaths() []string {
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, 3)
+
+	add := func(path string) {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			return
+		}
+
+		normalized := filepath.Clean(trimmed)
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+
+		seen[normalized] = struct{}{}
+		paths = append(paths, normalized)
+	}
+
+	if defaultPath, err := config.DefaultConfigPath(); err == nil {
+		add(defaultPath)
+	}
+
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		add(filepath.Join(appData, "JarvisAgent", "config.json"))
+		add(filepath.Join(appData, "CordycepsAgent", "config.json"))
+	}
+
+	return paths
+}
+
+func psSingleQuoted(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func runWithTimeout(cmd *exec.Cmd, timeout time.Duration) error {

@@ -71,6 +71,7 @@ const VOLUME_DOWN_PREFIXES = [
 
 const MEDIA_NEXT_PREFIXES = ["next track", "skip track", "next", "skip"];
 const MEDIA_PREVIOUS_PREFIXES = ["previous track", "previous", "prev", "back"];
+const AGENT_REMOVE_BASE_PHRASES = ["remove agent", "uninstall agent", "decommission agent"];
 const EMERGENCY_BASE_PHRASES = ["panic", "panic mode", "lockdown", "emergency", "emergency mode"];
 const EMERGENCY_CONFIRM_SUFFIXES = ["confirm", "confirmed"];
 
@@ -398,6 +399,35 @@ function parseEmergencyLockdown(commandPhrase: string): TypedCommand | ParseErro
   return null;
 }
 
+function parseAgentRemove(commandPhrase: string): TypedCommand | ParseError | null {
+  const normalizedPhrase = stripTrailingPunctuation(stripPoliteSuffix(commandPhrase));
+  if (!normalizedPhrase) {
+    return null;
+  }
+
+  for (const phrase of AGENT_REMOVE_BASE_PHRASES) {
+    if (normalizedPhrase === phrase) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `${phrase} requires explicit confirmation (use: ${phrase} confirm confirm)`,
+      };
+    }
+
+    if (normalizedPhrase === `${phrase} confirm`) {
+      return {
+        code: "MALFORMED_ARGUMENT",
+        message: `${phrase} requires a second confirmation (use: ${phrase} confirm confirm)`,
+      };
+    }
+
+    if (normalizedPhrase === `${phrase} confirm confirm`) {
+      return buildNoArgCommand("AGENT_REMOVE");
+    }
+  }
+
+  return null;
+}
+
 function parseAdminCommand(rawCommandPhrase: string): TypedCommand | ParseError | null {
   const trimmed = rawCommandPhrase.trim();
   const adminPrefix = trimmed.match(/^admin\b/i);
@@ -639,6 +669,11 @@ function parseCommandPhrase(rawCommandPhrase: string, normalizedCommandPhrase: s
   const emergencyCommand = parseEmergencyLockdown(normalizedPhrase);
   if (emergencyCommand) {
     return emergencyCommand;
+  }
+
+  const agentRemoveCommand = parseAgentRemove(normalizedPhrase);
+  if (agentRemoveCommand) {
+    return agentRemoveCommand;
   }
 
   const exactType = EXACT_COMMANDS[stripTrailingPunctuation(stripPoliteSuffix(normalizedPhrase))];

@@ -19,12 +19,27 @@ type Config struct {
 	Version          string `json:"version"`
 }
 
-func DefaultConfigPath() (string, error) {
+func ResolveConfigPath() (string, error) {
 	override := strings.TrimSpace(os.Getenv("CORDYCEPS_AGENT_CONFIG"))
 	if override != "" {
 		return override, nil
 	}
 
+	path, err := DefaultConfigPath()
+	if err != nil {
+		return "", err
+	}
+
+	if runtime.GOOS == "windows" {
+		if err := migrateLegacyWindowsConfig(path); err != nil {
+			return "", err
+		}
+	}
+
+	return path, nil
+}
+
+func DefaultConfigPath() (string, error) {
 	if runtime.GOOS == "windows" {
 		appData := strings.TrimSpace(os.Getenv("APPDATA"))
 		if appData == "" {
@@ -40,6 +55,100 @@ func DefaultConfigPath() (string, error) {
 	}
 
 	return filepath.Join(homeDir, ".cordyceps-agent", "config.json"), nil
+}
+
+func LegacyConfigPath() (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", nil
+	}
+
+	appData := strings.TrimSpace(os.Getenv("APPDATA"))
+	if appData == "" {
+		return "", errors.New("APPDATA is not set")
+	}
+
+	return filepath.Join(appData, "JarvisAgent", "config.json"), nil
+}
+
+func migrateLegacyWindowsConfig(targetPath string) error {
+	legacyPath, err := LegacyConfigPath()
+	if err != nil {
+		return err
+	}
+
+	targetPath = filepath.Clean(targetPath)
+	legacyPath = filepath.Clean(legacyPath)
+	if strings.EqualFold(targetPath, legacyPath) {
+		return nil
+	}
+
+	if _, err := os.Stat(targetPath); err == nil {
+		return cleanupLegacyConfigIfDuplicate(targetPath, legacyPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat current config: %w", err)
+	}
+
+	if _, err := os.Stat(legacyPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("stat legacy config: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o700); err != nil {
+		return fmt.Errorf("create migrated config dir: %w", err)
+	}
+
+	if err := os.Rename(legacyPath, targetPath); err != nil {
+		payload, readErr := os.ReadFile(legacyPath)
+		if readErr != nil {
+			return fmt.Errorf("read legacy config: %w", readErr)
+		}
+
+		if writeErr := os.WriteFile(targetPath, payload, 0o600); writeErr != nil {
+			return fmt.Errorf("write migrated config: %w", writeErr)
+		}
+
+		_ = os.Remove(legacyPath)
+	}
+
+	removeDirIfEmpty(filepath.Dir(legacyPath))
+	return nil
+}
+
+func cleanupLegacyConfigIfDuplicate(targetPath string, legacyPath string) error {
+	legacyPayload, err := os.ReadFile(legacyPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read legacy config: %w", err)
+	}
+
+	targetPayload, err := os.ReadFile(targetPath)
+	if err != nil {
+		return fmt.Errorf("read current config: %w", err)
+	}
+
+	if string(targetPayload) != string(legacyPayload) {
+		return nil
+	}
+
+	_ = os.Remove(legacyPath)
+	removeDirIfEmpty(filepath.Dir(legacyPath))
+	return nil
+}
+
+func removeDirIfEmpty(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) != 0 {
+		return
+	}
+
+	_ = os.Remove(path)
 }
 
 func Load(path string) (*Config, error) {

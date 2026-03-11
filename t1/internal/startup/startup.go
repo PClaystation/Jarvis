@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const currentStartupName = "T1Agent"
+
 func EnsureStartupRegistration(executablePath string) error {
 	if runtime.GOOS != "windows" {
 		return nil
@@ -22,7 +24,7 @@ func EnsureStartupRegistration(executablePath string) error {
 		"schtasks",
 		"/Create",
 		"/TN",
-		"T1Agent",
+		currentStartupName,
 		"/SC",
 		"ONLOGON",
 		"/RL",
@@ -33,11 +35,17 @@ func EnsureStartupRegistration(executablePath string) error {
 	)
 
 	if _, err := cmd.CombinedOutput(); err == nil {
+		cleanupOtherStartupRegistrations(false)
 		return nil
 	}
 
 	// Fallback that works as standard user when Task Scheduler creation is blocked.
-	return ensureRunKey(executablePath)
+	if err := ensureRunKey(executablePath); err != nil {
+		return err
+	}
+
+	cleanupOtherStartupRegistrations(true)
+	return nil
 }
 
 func ensureRunKey(executablePath string) error {
@@ -47,7 +55,7 @@ func ensureRunKey(executablePath string) error {
 		"add",
 		`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
 		"/v",
-		"T1Agent",
+		currentStartupName,
 		"/t",
 		"REG_SZ",
 		"/d",
@@ -60,6 +68,34 @@ func ensureRunKey(executablePath string) error {
 	}
 
 	return nil
+}
+
+func cleanupOtherStartupRegistrations(keepCurrentRunKey bool) {
+	for _, name := range []string{"E1Agent", "A1Agent", "CordycepsAgent", "JarvisAgent"} {
+		deleteScheduledTask(name)
+		deleteRunKeyValue(name)
+	}
+
+	if !keepCurrentRunKey {
+		deleteRunKeyValue(currentStartupName)
+	}
+}
+
+func deleteScheduledTask(name string) {
+	cmd := exec.Command("schtasks", "/Delete", "/TN", name, "/F")
+	_, _ = cmd.CombinedOutput()
+}
+
+func deleteRunKeyValue(name string) {
+	cmd := exec.Command(
+		"reg",
+		"delete",
+		`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+		"/v",
+		name,
+		"/f",
+	)
+	_, _ = cmd.CombinedOutput()
 }
 
 func hiddenLaunchCommand(executablePath string) string {

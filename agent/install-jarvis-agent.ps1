@@ -9,7 +9,7 @@ param(
 
   [string]$DisplayName = "",
 
-  [string]$AgentExePath = ".\jarvis-agent.exe",
+  [string]$AgentExePath = ".\cordyceps-agent.exe",
 
   [switch]$Foreground
 )
@@ -17,14 +17,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path -LiteralPath $AgentExePath)) {
-  throw "Agent executable not found at '$AgentExePath'. Build or copy jarvis-agent.exe first."
+  throw "Agent executable not found at '$AgentExePath'. Build or copy cordyceps-agent.exe first."
 }
 
-$installRoot = Join-Path $env:LOCALAPPDATA "JarvisAgent"
+$installRoot = Join-Path $env:LOCALAPPDATA "CordycepsAgent"
+$legacyInstallRoot = Join-Path $env:LOCALAPPDATA "JarvisAgent"
 New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
 
-$installedExe = Join-Path $installRoot "jarvis-agent.exe"
+$installedExe = Join-Path $installRoot "cordyceps-agent.exe"
 Copy-Item -LiteralPath $AgentExePath -Destination $installedExe -Force
+
+$legacyExe = Join-Path $legacyInstallRoot "jarvis-agent.exe"
+if (Test-Path -LiteralPath $legacyExe) {
+  Remove-Item -LiteralPath $legacyExe -Force -ErrorAction SilentlyContinue
+}
 
 $args = @(
   "--server-url", $ServerUrl,
@@ -44,7 +50,7 @@ if ($Foreground.IsPresent) {
   $args += "--foreground"
 }
 
-Write-Host "Starting Jarvis agent enrollment..."
+Write-Host "Starting Cordyceps agent enrollment..."
 Write-Host "Binary: $installedExe"
 
 if ($Foreground.IsPresent) {
@@ -56,4 +62,4 @@ if ($Foreground.IsPresent) {
 
 Write-Host "Done. Agent started."
 Write-Host "If DisplayName was provided, every remote using this server will show it."
-Write-Host "Config path: $env:APPDATA\JarvisAgent\config.json"
+Write-Host "Config path: $env:APPDATA\CordycepsAgent\config.json"
