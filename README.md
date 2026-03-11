@@ -404,7 +404,7 @@ Phone command:
 
 ```bash
 curl -X POST http://localhost:8080/api/command \
-  -H "Authorization: Bearer YOUR_PHONE_API_TOKEN" \
+  -H "Authorization: Bearer <PHONE_API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"text":"m1 ping","source":"iphone","request_id":"test-1"}'
 ```
@@ -413,7 +413,7 @@ Push update (single device):
 
 ```bash
 curl -X POST http://localhost:8080/api/update \
-  -H "Authorization: Bearer YOUR_PHONE_API_TOKEN" \
+  -H "Authorization: Bearer <PHONE_API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"target":"m1","version":"0.2.0","package_url":"https://mpmc.ddns.net/updates/cordyceps-agent-0.2.0.exe"}'
 ```
@@ -422,7 +422,7 @@ Queue update for offline single device (dispatches on next reconnect):
 
 ```bash
 curl -X POST http://localhost:8080/api/update \
-  -H "Authorization: Bearer YOUR_PHONE_API_TOKEN" \
+  -H "Authorization: Bearer <PHONE_API_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"target":"m1","version":"0.2.0","package_url":"https://mpmc.ddns.net/updates/cordyceps-agent-0.2.0.exe","queue_if_offline":true}'
 ```

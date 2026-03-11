@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test --import tsx test/**/*.test.ts",
+    "test": "node scripts/run-tests.cjs",
     "show-config": "tsx src/tools/showConfig.ts"
   },
   "dependencies": {
