@@ -61,6 +61,109 @@ enum CordycepsClient {
     )
   }
 
+  static func loadGroups(config: ConnectionConfig) async throws -> APIResponse<GroupsResponse> {
+    try await execute(
+      config: config,
+      path: "/api/groups",
+      method: "GET",
+      body: Optional<CommandRequest>.none,
+      responseType: GroupsResponse.self
+    )
+  }
+
+  static func upsertGroup(
+    config: ConnectionConfig,
+    groupID: String,
+    displayName: String,
+    description: String?,
+    deviceIDs: [String]
+  ) async throws -> APIResponse<GroupResponse> {
+    let payload = GroupUpsertRequest(
+      display_name: displayName,
+      description: description,
+      device_ids: deviceIDs
+    )
+
+    return try await execute(
+      config: config,
+      path: "/api/groups/\(groupID)",
+      method: "PUT",
+      body: payload,
+      responseType: GroupResponse.self
+    )
+  }
+
+  static func deleteGroup(config: ConnectionConfig, groupID: String) async throws -> APIResponse<GroupResponse> {
+    try await execute(
+      config: config,
+      path: "/api/groups/\(groupID)",
+      method: "DELETE",
+      body: Optional<CommandRequest>.none,
+      responseType: GroupResponse.self
+    )
+  }
+
+  static func loadCommandLogs(
+    config: ConnectionConfig,
+    limit: Int = 40,
+    before: String? = nil,
+    deviceID: String? = nil
+  ) async throws -> APIResponse<CommandLogsResponse> {
+    var params = URLComponents()
+    var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(max(1, min(limit, 500))))]
+    if let before, !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      items.append(URLQueryItem(name: "before", value: before))
+    }
+    if let deviceID, !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      items.append(URLQueryItem(name: "device_id", value: deviceID))
+    }
+    params.queryItems = items
+    let query = params.percentEncodedQuery.map { "?\($0)" } ?? ""
+
+    return try await execute(
+      config: config,
+      path: "/api/command-logs\(query)",
+      method: "GET",
+      body: Optional<CommandRequest>.none,
+      responseType: CommandLogsResponse.self
+    )
+  }
+
+  static func listAPIKeys(config: ConnectionConfig) async throws -> APIResponse<APIKeysResponse> {
+    try await execute(
+      config: config,
+      path: "/api/auth/keys",
+      method: "GET",
+      body: Optional<CommandRequest>.none,
+      responseType: APIKeysResponse.self
+    )
+  }
+
+  static func createAPIKey(
+    config: ConnectionConfig,
+    name: String,
+    scopes: [String]
+  ) async throws -> APIResponse<APIKeyCreateResponse> {
+    let payload = APIKeyCreateRequest(name: name, scopes: scopes)
+    return try await execute(
+      config: config,
+      path: "/api/auth/keys",
+      method: "POST",
+      body: payload,
+      responseType: APIKeyCreateResponse.self
+    )
+  }
+
+  static func revokeAPIKey(config: ConnectionConfig, keyID: String) async throws -> APIResponse<ErrorResponse> {
+    try await execute(
+      config: config,
+      path: "/api/auth/keys/\(keyID)/revoke",
+      method: "POST",
+      body: Optional<CommandRequest>.none,
+      responseType: ErrorResponse.self
+    )
+  }
+
   static func sendCommand(config: ConnectionConfig, text: String) async throws -> APIResponse<CommandResponse> {
     let requestID = requestID(prefix: "ios")
     let payload = CommandRequest(
@@ -74,6 +177,29 @@ enum CordycepsClient {
     return try await execute(
       config: config,
       path: "/api/command",
+      method: "POST",
+      body: payload,
+      responseType: CommandResponse.self
+    )
+  }
+
+  static func sendGroupCommand(
+    config: ConnectionConfig,
+    groupID: String,
+    text: String,
+    confirmBulk: Bool
+  ) async throws -> APIResponse<CommandResponse> {
+    let requestID = requestID(prefix: "ios-group")
+    let payload = GroupCommandRequest(
+      request_id: requestID,
+      text: text,
+      source: "ios-native",
+      confirm_bulk: confirmBulk
+    )
+
+    return try await execute(
+      config: config,
+      path: "/api/groups/\(groupID)/command",
       method: "POST",
       body: payload,
       responseType: CommandResponse.self
@@ -115,21 +241,7 @@ enum CordycepsClient {
     body: RequestBody?,
     responseType: ResponseBody.Type
   ) async throws -> APIResponse<ResponseBody> {
-    guard let endpointURL = buildURL(baseURL: config.baseURL, path: path) else {
-      throw CordycepsClientError.invalidBaseURL
-    }
-
-    var request = URLRequest(url: endpointURL)
-    request.httpMethod = method
-    request.timeoutInterval = 20
-    request.cachePolicy = .reloadIgnoringLocalCacheData
-    request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-    if let body {
-      request.httpBody = try encoder.encode(body)
-      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    }
+    var request = try makeRequest(config: config, path: path, method: method, body: body)
 
     let data: Data
     let response: URLResponse
@@ -161,6 +273,44 @@ enum CordycepsClient {
       rawJSON: prettyJSON(from: data),
       latencyMs: latencyMs,
       statusCode: http.statusCode
+    )
+  }
+
+  static func makeRequest<RequestBody: Encodable>(
+    config: ConnectionConfig,
+    path: String,
+    method: String,
+    body: RequestBody?
+  ) throws -> URLRequest {
+    guard let endpointURL = buildURL(baseURL: config.baseURL, path: path) else {
+      throw CordycepsClientError.invalidBaseURL
+    }
+
+    var request = URLRequest(url: endpointURL)
+    request.httpMethod = method
+    request.timeoutInterval = 20
+    request.cachePolicy = .reloadIgnoringLocalCacheData
+    request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    if let body {
+      request.httpBody = try encoder.encode(body)
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    }
+
+    return request
+  }
+
+  static func makeRequest(
+    config: ConnectionConfig,
+    path: String,
+    method: String
+  ) throws -> URLRequest {
+    try makeRequest(
+      config: config,
+      path: path,
+      method: method,
+      body: Optional<CommandRequest>.none
     )
   }
 

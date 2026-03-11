@@ -1,0 +1,48 @@
+export interface RealtimeEvent {
+  type: string;
+  ts: string;
+  payload: Record<string, unknown>;
+}
+
+export type EventListener = (event: RealtimeEvent) => void;
+
+export class EventHub {
+  private readonly listeners = new Map<number, EventListener>();
+
+  private nextListenerId = 1;
+
+  public subscribe(listener: EventListener): () => void {
+    const id = this.nextListenerId;
+    this.nextListenerId += 1;
+
+    this.listeners.set(id, listener);
+
+    return () => {
+      this.listeners.delete(id);
+    };
+  }
+
+  public publish(type: string, payload: Record<string, unknown>): void {
+    if (this.listeners.size === 0) {
+      return;
+    }
+
+    const event: RealtimeEvent = {
+      type,
+      ts: new Date().toISOString(),
+      payload,
+    };
+
+    for (const listener of this.listeners.values()) {
+      try {
+        listener(event);
+      } catch {
+        // Ignore listener failures to avoid impacting publisher code paths.
+      }
+    }
+  }
+
+  public listenerCount(): number {
+    return this.listeners.size;
+  }
+}

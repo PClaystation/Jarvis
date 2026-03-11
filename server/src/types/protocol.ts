@@ -104,6 +104,7 @@ export interface DeviceRecord {
   version: string | null;
   hostname: string | null;
   username: string | null;
+  capabilities: string[];
   created_at: string;
   updated_at: string;
 }

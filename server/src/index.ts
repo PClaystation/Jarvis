@@ -3,6 +3,7 @@ import { registerApiRoutes } from "./api/routes";
 import { registerPwaRoutes } from "./api/pwaRoutes";
 import { loadConfig } from "./config/env";
 import { Database } from "./db/database";
+import { EventHub } from "./events/eventHub";
 import { DeviceRegistry } from "./realtime/deviceRegistry";
 import { registerRealtime } from "./realtime/realtimeServer";
 import { CommandRouter } from "./router/commandRouter";
@@ -134,7 +135,7 @@ function applyCorsHeaders(origin: string, allowlist: string[], reply: { header: 
   reply.header("Access-Control-Allow-Origin", origin);
   reply.header("Vary", "Origin");
   reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  reply.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   reply.header("Access-Control-Max-Age", "86400");
   return true;
 }
@@ -161,6 +162,7 @@ async function main(): Promise<void> {
   const db = new Database(config.sqlitePath);
   const registry = new DeviceRegistry();
   const router = new CommandRouter(registry, config.commandTimeoutMs, config.maxPendingCommands);
+  const eventHub = new EventHub();
 
   const server = fastify({
     logger: false,
@@ -206,12 +208,14 @@ async function main(): Promise<void> {
     db,
     registry,
     router,
+    eventHub,
   });
 
   await registerRealtime(server, {
     db,
     registry,
     router,
+    eventHub,
     wsAuthTimeoutMs: config.wsAuthTimeoutMs,
     wsPingIntervalMs: config.wsPingIntervalMs,
     wsMaxMessageBytes: config.wsMaxMessageBytes,
@@ -223,6 +227,11 @@ async function main(): Promise<void> {
       for (const deviceId of timedOutDevices) {
         db.markDeviceOffline(deviceId);
         router.clearDevicePending(deviceId);
+        eventHub.publish("device_status", {
+          device_id: deviceId,
+          status: "offline",
+          reason: "heartbeat_timeout",
+        });
         log("warn", "Agent heartbeat expired", { device_id: deviceId });
       }
     } catch (error) {
@@ -250,6 +259,7 @@ async function main(): Promise<void> {
     secrets_path_source: config.secretsPathSource,
     max_pending_commands: config.maxPendingCommands,
     command_timeout_ms: config.commandTimeoutMs,
+    realtime_listeners: eventHub.listenerCount(),
     update_command_timeout_ms: config.updateCommandTimeoutMs,
     update_metadata_timeout_ms: config.updateMetadataTimeoutMs,
     update_max_package_bytes: config.updateMaxPackageBytes,

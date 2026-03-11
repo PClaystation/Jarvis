@@ -17,8 +17,11 @@ struct ContentView: View {
             heroCard
             connectionCard
             devicesCard
+            groupsCard
             commandCard
             updateCard
+            historyCard
+            apiKeysCard
             resultCard
           }
           .padding(.horizontal, 16)
@@ -27,6 +30,8 @@ struct ContentView: View {
         }
         .refreshable {
           await viewModel.loadDevices()
+          await viewModel.loadGroups(silent: true)
+          await viewModel.loadCommandLogs(silent: true, append: false)
         }
       }
       .navigationTitle("Cordyceps Bloom")
@@ -38,7 +43,11 @@ struct ContentView: View {
               .tint(CordycepsTheme.myceliumGlow)
           } else {
             Button {
-              Task { await viewModel.loadDevices() }
+              Task {
+                await viewModel.loadDevices()
+                await viewModel.loadGroups(silent: true)
+                await viewModel.loadCommandLogs(silent: true, append: false)
+              }
             } label: {
               Label("Refresh", systemImage: "arrow.clockwise")
             }
@@ -325,6 +334,13 @@ struct ContentView: View {
           .foregroundStyle(CordycepsTheme.capsuleAmber.opacity(0.95))
       }
 
+      if let capabilities = device.capabilities, !capabilities.isEmpty {
+        Text(capabilities.prefix(3).joined(separator: ", "))
+          .font(.system(.caption2, design: .rounded))
+          .foregroundStyle(Color.white.opacity(0.6))
+          .lineLimit(1)
+      }
+
       Spacer(minLength: 0)
 
       Button {
@@ -349,12 +365,125 @@ struct ContentView: View {
     )
   }
 
+  private var groupsCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("Groups")
+
+        Text("Create and use guarded bulk-target groups (target format: group:<id>).")
+          .font(.system(.caption, design: .rounded))
+          .foregroundStyle(Color.white.opacity(0.72))
+
+        TextField("Group ID (office)", text: $viewModel.groupIDInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        TextField("Group Name (Office PCs)", text: $viewModel.groupDisplayNameInput)
+          .textInputAutocapitalization(.words)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        TextField("Description (optional)", text: $viewModel.groupDescriptionInput)
+          .textInputAutocapitalization(.sentences)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        TextField("Members (m1,t1,s1)", text: $viewModel.groupMembersInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        HStack(spacing: 8) {
+          actionButton("Save Group", icon: "square.and.arrow.down.fill", role: .normal, loading: viewModel.isSavingGroup) {
+            Task { await viewModel.saveGroup() }
+          }
+          actionButton("Delete Group", icon: "trash.fill", role: .danger, loading: viewModel.isDeletingGroup) {
+            Task { await viewModel.deleteGroup() }
+          }
+          actionButton("Load Groups", icon: "arrow.clockwise.circle.fill", role: .normal, loading: viewModel.isLoadingGroups) {
+            Task { await viewModel.loadGroups() }
+          }
+        }
+
+        if viewModel.groups.isEmpty {
+          emptyState("No groups loaded yet.")
+        } else {
+          ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 10) {
+              ForEach(viewModel.groups) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                  Text(group.display_name)
+                    .font(.system(.headline, design: .rounded).weight(.bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                  Text("\(group.group_id) • \(group.device_ids.count) members")
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.7))
+
+                  if let description = group.description, !description.isEmpty {
+                    Text(description)
+                      .font(.system(.caption2, design: .rounded))
+                      .foregroundStyle(Color.white.opacity(0.68))
+                      .lineLimit(2)
+                  }
+
+                  if let onlineCount = group.online_count {
+                    Text("\(onlineCount) online")
+                      .font(.system(.caption2, design: .rounded).weight(.semibold))
+                      .foregroundStyle(CordycepsTheme.myceliumGlow.opacity(0.9))
+                  }
+
+                  Spacer(minLength: 0)
+
+                  HStack(spacing: 8) {
+                    Button {
+                      viewModel.useGroupAsTarget(group.group_id)
+                    } label: {
+                      Text("Use Group")
+                        .font(.system(.caption2, design: .rounded).weight(.bold))
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(CordycepsTheme.primaryButton)
+
+                    Button {
+                      viewModel.selectGroupForEditing(group)
+                    } label: {
+                      Text("Edit")
+                        .font(.system(.caption2, design: .rounded).weight(.bold))
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(CordycepsTheme.capsuleAmber)
+                  }
+                }
+                .padding(12)
+                .frame(width: 250, height: 172, alignment: .topLeading)
+                .background(
+                  RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(CordycepsTheme.cardFill)
+                    .overlay(
+                      RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+                    )
+                )
+              }
+            }
+            .padding(.vertical, 2)
+          }
+        }
+      }
+    }
+  }
+
   private var commandCard: some View {
     CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
         sectionHeader("Command")
 
-        TextField("Target (m1 or all)", text: $viewModel.targetInput)
+        TextField("Target (m1, all, or group:office)", text: $viewModel.targetInput)
           .textInputAutocapitalization(.never)
           .autocorrectionDisabled()
           .cordycepsFieldStyle()
@@ -388,6 +517,10 @@ struct ContentView: View {
         Text(viewModel.actionSearchInfo)
           .font(.system(.caption, design: .rounded))
           .foregroundStyle(Color.white.opacity(0.70))
+
+        if !viewModel.selectedActionSupported {
+          dangerZone("This action is not supported by the currently selected target.")
+        }
 
         if viewModel.selectedActionUsesArgument {
           TextField(viewModel.selectedActionArgumentPlaceholder, text: $viewModel.argumentInput)
@@ -494,7 +627,8 @@ struct ContentView: View {
           "Send Command",
           icon: "paperplane.fill",
           role: viewModel.selectedActionIsDangerous ? .danger : .primary,
-          loading: viewModel.isSendingCommand
+          loading: viewModel.isSendingCommand,
+          disabled: !viewModel.selectedActionSupported
         ) {
           if viewModel.selectedActionIsDangerous {
             showDangerousSendConfirmation = true
@@ -563,6 +697,164 @@ struct ContentView: View {
 
         actionButton("Review & Push", icon: "arrow.up.circle.fill", role: .warning, loading: viewModel.isPushingUpdate) {
           showUpdateConfirmation = true
+        }
+      }
+    }
+  }
+
+  private var historyCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("History")
+
+        TextField("Filter by device ID (optional)", text: $viewModel.historyDeviceFilterInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        HStack(spacing: 8) {
+          actionButton("Load", icon: "clock.arrow.circlepath", role: .normal, loading: viewModel.isLoadingHistory) {
+            Task { await viewModel.loadCommandLogs(silent: false, append: false) }
+          }
+          actionButton("More", icon: "ellipsis.circle.fill", role: .normal, loading: viewModel.isLoadingHistory) {
+            Task { await viewModel.loadCommandLogs(silent: false, append: true) }
+          }
+        }
+
+        if viewModel.commandLogs.isEmpty {
+          emptyState("No command history loaded.")
+        } else {
+          ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 8) {
+              ForEach(viewModel.commandLogs.prefix(40)) { entry in
+                VStack(alignment: .leading, spacing: 6) {
+                  HStack {
+                    Text("\(entry.device_id) • \(entry.parsed_type)")
+                      .font(.system(.caption, design: .rounded).weight(.semibold))
+                      .foregroundStyle(.white)
+                    Spacer(minLength: 0)
+                    Text(entry.status.uppercased())
+                      .font(.system(size: 10, weight: .bold, design: .rounded))
+                      .foregroundStyle(entry.status == "ok" ? CordycepsTheme.myceliumGlow : CordycepsTheme.errorText)
+                  }
+
+                  Text("\(entry.parsed_target) • \(entry.request_id)")
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.66))
+
+                  Text(entry.result_message ?? entry.raw_text)
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.8))
+                    .lineLimit(2)
+
+                  Text(toLocal(entry.created_at))
+                    .font(.system(.caption2, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.55))
+                }
+                .padding(10)
+                .background(
+                  RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(CordycepsTheme.cardFill)
+                    .overlay(
+                      RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+                    )
+                )
+              }
+            }
+          }
+          .frame(maxHeight: 280)
+        }
+      }
+    }
+  }
+
+  private var apiKeysCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("API Keys")
+
+        Text("Manage scoped tokens for additional users. Requires admin scope.")
+          .font(.system(.caption, design: .rounded))
+          .foregroundStyle(Color.white.opacity(0.72))
+
+        TextField("Key name", text: $viewModel.apiKeyNameInput)
+          .textInputAutocapitalization(.words)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        TextField("Scopes (comma-separated)", text: $viewModel.apiKeyScopesInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+
+        HStack(spacing: 8) {
+          actionButton("Create", icon: "key.fill", role: .warning, loading: viewModel.isCreatingAPIKey) {
+            Task { await viewModel.createAPIKey() }
+          }
+          actionButton("Load", icon: "arrow.clockwise.circle.fill", role: .normal, loading: viewModel.isLoadingAPIKeys) {
+            Task { await viewModel.loadAPIKeys() }
+          }
+        }
+
+        if !viewModel.generatedAPIKey.isEmpty {
+          Text("Generated key (shown once)")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(CordycepsTheme.capsuleAmber.opacity(0.95))
+
+          Text(viewModel.generatedAPIKey)
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(Color.white.opacity(0.9))
+            .textSelection(.enabled)
+            .padding(10)
+            .background(
+              RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.black.opacity(0.24))
+                .overlay(
+                  RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+                )
+            )
+        }
+
+        if viewModel.apiKeys.isEmpty {
+          emptyState("No API keys loaded.")
+        } else {
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(viewModel.apiKeys.prefix(12)) { key in
+              VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                  Text(key.name)
+                    .font(.system(.caption, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.white)
+                  Spacer(minLength: 0)
+                  Text(key.status.uppercased())
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(key.status == "active" ? CordycepsTheme.myceliumGlow : CordycepsTheme.errorText)
+                }
+
+                Text("\(key.key_id) • \(key.scopes.joined(separator: ", "))")
+                  .font(.system(.caption2, design: .rounded))
+                  .foregroundStyle(Color.white.opacity(0.66))
+                  .lineLimit(2)
+
+                if key.status == "active" {
+                  actionButton("Revoke", icon: "xmark.circle.fill", role: .danger) {
+                    Task { await viewModel.revokeAPIKey(key.key_id) }
+                  }
+                }
+              }
+              .padding(10)
+              .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                  .fill(CordycepsTheme.cardFill)
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                      .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+                  )
+              )
+            }
+          }
         }
       }
     }
@@ -638,6 +930,13 @@ struct ContentView: View {
     Text(title)
       .font(.system(.title3, design: .rounded).weight(.semibold))
       .foregroundStyle(.white)
+  }
+
+  private func toLocal(_ iso: String) -> String {
+    guard let date = ISO8601DateFormatter().date(from: iso) else {
+      return iso
+    }
+    return DateFormatter.cordyceps.string(from: date)
   }
 
   private func emptyState(_ text: String) -> some View {

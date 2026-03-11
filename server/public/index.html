@@ -50,8 +50,8 @@
         <h2>Command</h2>
         <div class="grid">
           <div>
-            <label for="targetInput">Target</label>
-            <input id="targetInput" type="text" value="m1" />
+        <label for="targetInput">Target</label>
+        <input id="targetInput" type="text" value="m1" placeholder="m1 or group:office" />
           </div>
           <div class="command-browser">
             <label for="actionSearchInput">Find Action</label>
@@ -85,6 +85,25 @@
       </section>
 
       <section class="panel">
+        <h2>Groups</h2>
+        <p class="muted">Create target groups for guarded bulk actions.</p>
+        <label for="groupIdInput">Group ID</label>
+        <input id="groupIdInput" type="text" placeholder="office" />
+        <label for="groupDisplayNameInput">Group Name</label>
+        <input id="groupDisplayNameInput" type="text" placeholder="Office PCs" />
+        <label for="groupDescriptionInput">Description (optional)</label>
+        <input id="groupDescriptionInput" type="text" placeholder="Shared workspace devices" />
+        <label for="groupMembersInput">Device IDs (comma-separated)</label>
+        <input id="groupMembersInput" type="text" placeholder="m1,t1,s1" />
+        <div class="row">
+          <button id="saveGroupBtn" type="button">Save Group</button>
+          <button id="deleteGroupBtn" type="button">Delete Group</button>
+          <button id="loadGroupsBtn" type="button">Load Groups</button>
+        </div>
+        <div id="groupCards" class="device-cards"></div>
+      </section>
+
+      <section class="panel">
         <h2>Agent Update</h2>
         <p class="muted">Push a verified agent EXE update to one device or all online devices.</p>
         <div class="danger-zone">
@@ -106,7 +125,38 @@
         </div>
       </section>
 
+      <section class="panel full-span">
+        <h2>History</h2>
+        <div class="row">
+          <input id="historyDeviceFilterInput" type="text" placeholder="Filter by device ID (optional)" />
+          <button id="loadHistoryBtn" type="button">Load History</button>
+          <button id="moreHistoryBtn" type="button">Load More</button>
+        </div>
+        <p id="historySummary" class="muted">No history loaded.</p>
+        <div id="historyTimeline" class="history-list"></div>
+      </section>
+
       <section class="panel">
+        <h2>API Keys</h2>
+        <p class="muted">Create scoped keys for additional users/devices. Requires admin scope.</p>
+        <label for="apiKeyNameInput">Key Name</label>
+        <input id="apiKeyNameInput" type="text" placeholder="Charlie iPhone" />
+        <label for="apiKeyScopesInput">Scopes (comma-separated)</label>
+        <input
+          id="apiKeyScopesInput"
+          type="text"
+          placeholder="devices:read,commands:execute,history:read,events:read"
+        />
+        <div class="row">
+          <button id="createApiKeyBtn" type="button">Create Key</button>
+          <button id="loadApiKeysBtn" type="button">Load Keys</button>
+        </div>
+        <label for="newApiKeyBox">Last Generated API Key (shown once)</label>
+        <textarea id="newApiKeyBox" rows="2" placeholder="No key generated yet." readonly></textarea>
+        <div id="apiKeyList" class="history-list"></div>
+      </section>
+
+      <section class="panel full-span">
         <h2>Result</h2>
         <div class="result-grid">
           <div class="result-row">

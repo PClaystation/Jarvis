@@ -2,10 +2,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { extractBearerToken, constantTimeEqual } from "../auth/auth";
 import type { AppConfig } from "../config/env";
 import type { Database } from "../db/database";
+import { EventHub, type RealtimeEvent } from "../events/eventHub";
 import { parseExternalCommand } from "../parser/commandParser";
 import { DeviceRegistry } from "../realtime/deviceRegistry";
 import { CommandRouter, DispatchError } from "../router/commandRouter";
-import type { CommandDispatchResult } from "../types/protocol";
+import type { CommandDispatchResult, TypedCommand } from "../types/protocol";
 import { randomToken, sha256Hex } from "../utils/crypto";
 import { makeRequestId } from "../utils/id";
 import { log } from "../utils/logger";
@@ -16,6 +17,7 @@ interface ApiDeps {
   db: Database;
   registry: DeviceRegistry;
   router: CommandRouter;
+  eventHub: EventHub;
 }
 
 interface CommandRequestBody {
@@ -58,10 +60,77 @@ interface RenameDeviceBody {
   display_name?: string;
 }
 
+interface CreateApiKeyBody {
+  name?: string;
+  scopes?: string[];
+}
+
+interface UpsertGroupBody {
+  display_name?: string;
+  description?: string;
+  device_ids?: string[];
+}
+
+interface GroupCommandBody {
+  request_id?: string;
+  text?: string;
+  source?: string;
+  confirm_bulk?: boolean;
+}
+
+type ApiScope =
+  | "devices:read"
+  | "devices:write"
+  | "commands:execute"
+  | "updates:execute"
+  | "history:read"
+  | "groups:read"
+  | "groups:write"
+  | "events:read"
+  | "admin:manage";
+
 const MAX_TEXT_LEN = 4096;
 const MAX_SOURCE_LEN = 40;
 const MAX_UPDATE_VERSION_LEN = 64;
 const MAX_CAPABILITIES = 50;
+const MAX_GROUP_ID_LEN = 32;
+const MAX_GROUP_DISPLAY_NAME_LEN = 80;
+const MAX_GROUP_DESCRIPTION_LEN = 240;
+const MAX_GROUP_MEMBER_COUNT = 100;
+const DEFAULT_HISTORY_LIMIT = 100;
+const MAX_HISTORY_LIMIT = 500;
+const MAX_SSE_TOKEN_LENGTH = 512;
+const SSE_PING_INTERVAL_MS = 20_000;
+
+const API_SCOPES: ApiScope[] = [
+  "devices:read",
+  "devices:write",
+  "commands:execute",
+  "updates:execute",
+  "history:read",
+  "groups:read",
+  "groups:write",
+  "events:read",
+  "admin:manage",
+];
+
+const BULK_GROUP_ALLOWED_TYPES = new Set([
+  "PING",
+  "OPEN_APP",
+  "MEDIA_PLAY",
+  "MEDIA_PAUSE",
+  "MEDIA_PLAY_PAUSE",
+  "MEDIA_NEXT",
+  "MEDIA_PREVIOUS",
+  "VOLUME_UP",
+  "VOLUME_DOWN",
+  "MUTE",
+  "LOCK_PC",
+  "NOTIFY",
+  "CLIPBOARD_SET",
+  "SYSTEM_DISPLAY_OFF",
+]);
+
 const ADMIN_ONLY_COMMANDS = new Set([
   "ADMIN_EXEC_CMD",
   "ADMIN_EXEC_POWERSHELL",
@@ -86,19 +155,206 @@ function unauthorized(reply: FastifyReply): void {
   reply.code(401).send({ ok: false, message: "Unauthorized" });
 }
 
-function isPhoneAuthorized(request: FastifyRequest, config: AppConfig): boolean {
-  const token = extractBearerToken(request.headers.authorization);
-  if (!token) {
-    return false;
+function forbidden(reply: FastifyReply, message = "Forbidden"): void {
+  reply.code(403).send({ ok: false, message });
+}
+
+function hasScopes(candidate: Set<ApiScope>, requiredScopes: ApiScope[]): boolean {
+  if (requiredScopes.length === 0) {
+    return true;
   }
 
-  return constantTimeEqual(token, config.phoneApiToken);
+  return requiredScopes.every((scope) => candidate.has(scope));
+}
+
+function isValidApiScope(value: string): value is ApiScope {
+  return API_SCOPES.includes(value as ApiScope);
+}
+
+interface AuthContext {
+  subject: string;
+  scopes: Set<ApiScope>;
+  isOwnerToken: boolean;
+  keyId: string | null;
+}
+
+function tokenFromQuery(query: unknown): string {
+  if (!query || typeof query !== "object") {
+    return "";
+  }
+
+  const candidate = (query as Record<string, unknown>).token;
+  if (typeof candidate !== "string") {
+    return "";
+  }
+
+  return candidate.trim().slice(0, MAX_SSE_TOKEN_LENGTH);
+}
+
+function tokenFromRequest(request: FastifyRequest, allowQueryToken = false): string {
+  const fromHeader = extractBearerToken(request.headers.authorization);
+  if (fromHeader) {
+    return fromHeader;
+  }
+
+  if (!allowQueryToken) {
+    return "";
+  }
+
+  return tokenFromQuery(request.query);
+}
+
+function resolveAuthContext(
+  request: FastifyRequest,
+  deps: ApiDeps,
+  input?: { allowQueryToken?: boolean },
+): AuthContext | null {
+  const token = tokenFromRequest(request, input?.allowQueryToken === true);
+  if (!token) {
+    return null;
+  }
+
+  if (constantTimeEqual(token, deps.config.phoneApiToken)) {
+    return {
+      subject: "owner",
+      scopes: new Set<ApiScope>(API_SCOPES),
+      isOwnerToken: true,
+      keyId: null,
+    };
+  }
+
+  const key = deps.db.resolveApiKeyByToken(token);
+  if (!key || key.status !== "active") {
+    return null;
+  }
+
+  deps.db.touchApiKeyUsage(key.key_id);
+
+  const scopes = new Set<ApiScope>();
+  for (const scope of key.scopes) {
+    if (isValidApiScope(scope)) {
+      scopes.add(scope);
+    }
+  }
+
+  return {
+    subject: key.name,
+    scopes,
+    isOwnerToken: false,
+    keyId: key.key_id,
+  };
+}
+
+function authorize(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  deps: ApiDeps,
+  requiredScopes: ApiScope[],
+  input?: { allowQueryToken?: boolean },
+): AuthContext | null {
+  const auth = resolveAuthContext(request, deps, input);
+  if (!auth) {
+    unauthorized(reply);
+    return null;
+  }
+
+  if (!hasScopes(auth.scopes, requiredScopes)) {
+    forbidden(reply);
+    return null;
+  }
+
+  return auth;
 }
 
 function asTrimmedString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function asCreateApiKeyBody(body: unknown): CreateApiKeyBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as CreateApiKeyBody;
+}
+
+function asUpsertGroupBody(body: unknown): UpsertGroupBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as UpsertGroupBody;
+}
+
+function asGroupCommandBody(body: unknown): GroupCommandBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as GroupCommandBody;
+}
+
+function normalizeApiKeyScopes(value: unknown): ApiScope[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const scopes: ApiScope[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of value) {
+    const candidate = asTrimmedString(raw).toLowerCase();
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+
+    if (!isValidApiScope(candidate)) {
+      continue;
+    }
+
+    seen.add(candidate);
+    scopes.push(candidate);
+  }
+
+  return scopes;
+}
+
+function normalizeGroupId(value: unknown): string {
+  return asTrimmedString(value).toLowerCase();
+}
+
+function isValidGroupId(groupId: string): boolean {
+  if (groupId.length < 2 || groupId.length > MAX_GROUP_ID_LEN) {
+    return false;
+  }
+
+  return /^[a-z][a-z0-9_-]+$/.test(groupId);
+}
+
+function normalizeGroupDeviceIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+
+  for (const item of value) {
+    const deviceId = asTrimmedString(item).toLowerCase();
+    if (!deviceId || seen.has(deviceId)) {
+      continue;
+    }
+
+    if (!/^[a-z0-9_-]{2,32}$/.test(deviceId)) {
+      continue;
+    }
+
+    seen.add(deviceId);
+    deduped.push(deviceId);
+  }
+
+  return deduped;
+}
 
 function normalizeDesignationPrefix(candidate: unknown): string {
   const value = asTrimmedString(candidate).toLowerCase();
@@ -403,6 +659,66 @@ function normalizeCapabilities(value: unknown): string[] {
   return capabilities;
 }
 
+function parseActionTextAsCommand(text: string): TypedCommand | null {
+  const normalized = text.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = parseExternalCommand(`m1 ${normalized}`);
+  if ("code" in parsed) {
+    return null;
+  }
+
+  return parsed.command;
+}
+
+function publishCommandLogEvent(
+  deps: ApiDeps,
+  input: {
+    requestId: string;
+    deviceId: string;
+    source: string;
+    rawText: string;
+    parsedTarget: string;
+    parsedType: string;
+    status: string;
+    message: string | null;
+    errorCode?: string | null;
+  },
+): void {
+  deps.eventHub.publish("command_log", {
+    request_id: input.requestId,
+    device_id: input.deviceId,
+    source: input.source,
+    raw_text: input.rawText,
+    parsed_target: input.parsedTarget,
+    parsed_type: input.parsedType,
+    status: input.status,
+    message: input.message,
+    error_code: input.errorCode ?? null,
+    ts: new Date().toISOString(),
+  });
+}
+
+function normalizeHistoryLimit(value: unknown): number {
+  const parsed = Number.parseInt(asTrimmedString(value), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_HISTORY_LIMIT;
+  }
+
+  return Math.min(parsed, MAX_HISTORY_LIMIT);
+}
+
+function writeSseEvent(reply: FastifyReply, event: RealtimeEvent): void {
+  try {
+    reply.raw.write(`event: ${event.type}\n`);
+    reply.raw.write(`data: ${JSON.stringify({ ts: event.ts, ...event.payload })}\n\n`);
+  } catch {
+    // noop: closed sockets naturally fail writes.
+  }
+}
+
 export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps): Promise<void> {
   server.get("/api/health", async () => {
     const dbStats = deps.db.healthSnapshot();
@@ -417,12 +733,184 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       devices_total: dbStats.deviceCount,
       devices_online: dbStats.onlineDeviceCount,
       command_logs_total: dbStats.commandLogCount,
+      groups_total: dbStats.groupCount,
+      api_keys_total: dbStats.apiKeyCount,
     };
   });
 
+  server.get("/api/auth/scopes", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["admin:manage"]);
+    if (!auth) {
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      scopes: API_SCOPES,
+      subject: auth.subject,
+    });
+  });
+
+  server.get("/api/auth/keys", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["admin:manage"]);
+    if (!auth) {
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      keys: deps.db.listApiKeys(),
+    });
+  });
+
+  server.post("/api/auth/keys", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["admin:manage"]);
+    if (!auth) {
+      return;
+    }
+
+    const body = asCreateApiKeyBody(request.body);
+    const name = normalizeOptionalText(body.name, 80);
+    if (!name) {
+      reply.code(400).send({
+        ok: false,
+        message: "name is required",
+        error_code: "INVALID_KEY_NAME",
+      });
+      return;
+    }
+
+    const scopes = normalizeApiKeyScopes(body.scopes);
+    if (scopes.length === 0) {
+      reply.code(400).send({
+        ok: false,
+        message: "scopes must include at least one valid scope",
+        error_code: "INVALID_KEY_SCOPES",
+      });
+      return;
+    }
+
+    if (!auth.isOwnerToken && scopes.includes("admin:manage")) {
+      forbidden(reply, "Only owner token may mint admin keys");
+      return;
+    }
+
+    const rawToken = randomToken(32);
+    const tokenHash = sha256Hex(rawToken);
+    let created = null;
+    let attempts = 0;
+
+    while (!created && attempts < 5) {
+      attempts += 1;
+      const keyId = `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        created = deps.db.createApiKey({
+          keyId,
+          name,
+          tokenHash,
+          scopes,
+        });
+      } catch {
+        created = null;
+      }
+    }
+
+    if (!created) {
+      reply.code(500).send({
+        ok: false,
+        message: "Failed to create API key",
+        error_code: "API_KEY_CREATE_FAILED",
+      });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      key: created,
+      api_key: rawToken,
+    });
+  });
+
+  server.post("/api/auth/keys/:keyId/revoke", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["admin:manage"]);
+    if (!auth) {
+      return;
+    }
+
+    const params = request.params as { keyId?: string } | undefined;
+    const keyId = asTrimmedString(params?.keyId);
+    if (!keyId) {
+      reply.code(400).send({
+        ok: false,
+        message: "key_id is required",
+        error_code: "INVALID_KEY_ID",
+      });
+      return;
+    }
+
+    const revoked = deps.db.revokeApiKey(keyId);
+    if (!revoked) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown key: ${keyId}`,
+        error_code: "UNKNOWN_KEY",
+      });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      message: `Revoked key ${keyId}`,
+    });
+  });
+
+  server.get("/api/events", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["events:read"], { allowQueryToken: true });
+    if (!auth) {
+      return;
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    writeSseEvent(reply, {
+      type: "ready",
+      ts: new Date().toISOString(),
+      payload: {
+        subject: auth.subject,
+      },
+    });
+
+    const unsubscribe = deps.eventHub.subscribe((event) => {
+      writeSseEvent(reply, event);
+    });
+
+    const pingTimer = setInterval(() => {
+      writeSseEvent(reply, {
+        type: "ping",
+        ts: new Date().toISOString(),
+        payload: {},
+      });
+    }, SSE_PING_INTERVAL_MS);
+    pingTimer.unref?.();
+
+    const cleanup = (): void => {
+      clearInterval(pingTimer);
+      unsubscribe();
+    };
+
+    request.raw.on("close", cleanup);
+    request.raw.on("end", cleanup);
+    request.raw.on("error", cleanup);
+  });
+
   server.get("/api/devices", async (request, reply) => {
-    if (!isPhoneAuthorized(request, deps.config)) {
-      unauthorized(reply);
+    if (!authorize(request, reply, deps, ["devices:read"])) {
       return;
     }
 
@@ -433,8 +921,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
   });
 
   server.post("/api/devices/:deviceId/display-name", async (request, reply) => {
-    if (!isPhoneAuthorized(request, deps.config)) {
-      unauthorized(reply);
+    if (!authorize(request, reply, deps, ["devices:write"])) {
       return;
     }
 
@@ -463,6 +950,319 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       ok: true,
       device: deps.db.getDevice(deviceId),
       message: displayName ? `Saved name for ${deviceId}` : `Cleared name for ${deviceId}`,
+    });
+  });
+
+  server.get("/api/command-logs", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["history:read"])) {
+      return;
+    }
+
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const limit = normalizeHistoryLimit(query.limit);
+    const before = asTrimmedString(query.before);
+    const deviceId = asTrimmedString(query.device_id).toLowerCase();
+    const requestId = asTrimmedString(query.request_id);
+    const parsedType = asTrimmedString(query.parsed_type).toUpperCase();
+    const status = asTrimmedString(query.status).toLowerCase();
+
+    const logs = deps.db.listCommandLogs({
+      limit,
+      before: before || undefined,
+      deviceId: deviceId || undefined,
+      requestId: requestId || undefined,
+      parsedType: parsedType || undefined,
+      status: status || undefined,
+    });
+
+    const nextBefore = logs.length > 0 ? logs[logs.length - 1]?.created_at : null;
+
+    reply.send({
+      ok: true,
+      count: logs.length,
+      next_before: nextBefore,
+      logs,
+    });
+  });
+
+  server.get("/api/groups", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["groups:read"])) {
+      return;
+    }
+
+    const groups = deps.db.listDeviceGroups().map((group) => ({
+      ...group,
+      online_count: group.device_ids.filter((deviceId) => deps.registry.get(deviceId)).length,
+    }));
+
+    reply.send({
+      ok: true,
+      groups,
+    });
+  });
+
+  server.put("/api/groups/:groupId", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["groups:write"])) {
+      return;
+    }
+
+    const params = request.params as { groupId?: string } | undefined;
+    const groupId = normalizeGroupId(params?.groupId);
+    if (!isValidGroupId(groupId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "group_id must be 2-32 chars and use a-z, 0-9, _ or -",
+        error_code: "INVALID_GROUP_ID",
+      });
+      return;
+    }
+
+    const body = asUpsertGroupBody(request.body);
+    const displayName = normalizeOptionalText(body.display_name, MAX_GROUP_DISPLAY_NAME_LEN);
+    if (!displayName) {
+      reply.code(400).send({
+        ok: false,
+        message: "display_name is required",
+        error_code: "INVALID_GROUP_NAME",
+      });
+      return;
+    }
+
+    const description = normalizeOptionalText(body.description, MAX_GROUP_DESCRIPTION_LEN);
+    const deviceIds = normalizeGroupDeviceIds(body.device_ids);
+    if (deviceIds.length > MAX_GROUP_MEMBER_COUNT) {
+      reply.code(400).send({
+        ok: false,
+        message: `group has too many members (max ${MAX_GROUP_MEMBER_COUNT})`,
+        error_code: "GROUP_TOO_LARGE",
+      });
+      return;
+    }
+
+    const known = deps.db.listExistingDeviceIds(deviceIds);
+    const unknown = deviceIds.filter((deviceId) => !known.has(deviceId));
+    if (unknown.length > 0) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown devices: ${unknown.join(", ")}`,
+        error_code: "UNKNOWN_DEVICE",
+      });
+      return;
+    }
+
+    const group = deps.db.upsertDeviceGroup({
+      groupId,
+      displayName,
+      description,
+      deviceIds,
+    });
+
+    reply.send({
+      ok: true,
+      group,
+      message: `Saved group ${groupId}`,
+    });
+  });
+
+  server.delete("/api/groups/:groupId", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["groups:write"])) {
+      return;
+    }
+
+    const params = request.params as { groupId?: string } | undefined;
+    const groupId = normalizeGroupId(params?.groupId);
+    if (!isValidGroupId(groupId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "group_id must be 2-32 chars and use a-z, 0-9, _ or -",
+        error_code: "INVALID_GROUP_ID",
+      });
+      return;
+    }
+
+    const removed = deps.db.deleteDeviceGroup(groupId);
+    if (!removed) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown group: ${groupId}`,
+        error_code: "UNKNOWN_GROUP",
+      });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      message: `Deleted group ${groupId}`,
+    });
+  });
+
+  server.post("/api/groups/:groupId/command", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["groups:write", "commands:execute"])) {
+      return;
+    }
+
+    const params = request.params as { groupId?: string } | undefined;
+    const groupId = normalizeGroupId(params?.groupId);
+    if (!isValidGroupId(groupId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "group_id must be 2-32 chars and use a-z, 0-9, _ or -",
+        error_code: "INVALID_GROUP_ID",
+      });
+      return;
+    }
+
+    const group = deps.db.getDeviceGroup(groupId);
+    if (!group) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown group: ${groupId}`,
+        error_code: "UNKNOWN_GROUP",
+      });
+      return;
+    }
+
+    const body = asGroupCommandBody(request.body);
+    const rawText = asTrimmedString(body.text);
+    const source = normalizeSource(body.source || "group");
+    const requestId = normalizeRequestId(body.request_id);
+
+    if (!rawText) {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "Command rejected: command text is empty",
+        error_code: "EMPTY_COMMAND",
+      });
+      return;
+    }
+
+    const parsedFromFullText = parseExternalCommand(rawText);
+    const parsedCommand = "code" in parsedFromFullText ? parseActionTextAsCommand(rawText) : parsedFromFullText.command;
+    if (!parsedCommand) {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "Command rejected: unknown command",
+        error_code: "UNKNOWN_COMMAND",
+      });
+      return;
+    }
+
+    if (!BULK_GROUP_ALLOWED_TYPES.has(parsedCommand.type)) {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: `${parsedCommand.type} is not allowed for group dispatch`,
+        error_code: "GROUP_COMMAND_NOT_ALLOWED",
+      });
+      return;
+    }
+
+    if (parsedCommand.type !== "PING" && body.confirm_bulk !== true) {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "Bulk command requires confirm_bulk=true",
+        error_code: "BULK_CONFIRM_REQUIRED",
+      });
+      return;
+    }
+
+    const targetDeviceIds = group.device_ids.filter((deviceId) => deps.registry.get(deviceId));
+    if (targetDeviceIds.length === 0) {
+      reply.code(409).send({
+        ok: false,
+        request_id: requestId,
+        message: "No online devices in group",
+        error_code: "NO_ONLINE_DEVICES",
+      });
+      return;
+    }
+
+    const requiredCapability = requiredCapabilityForCommand(parsedCommand.type);
+    for (const deviceId of targetDeviceIds) {
+      const connected = deps.registry.get(deviceId);
+      if (!connected) {
+        continue;
+      }
+
+      if (requiredCapability && !connected.capabilities.includes(requiredCapability)) {
+        reply.code(409).send({
+          ok: false,
+          request_id: requestId,
+          message: `${deviceId} does not support ${parsedCommand.type.toLowerCase()} yet`,
+          error_code: "COMMAND_NOT_SUPPORTED",
+        });
+        return;
+      }
+
+      deps.db.insertCommandLog({
+        id: makeLogId(requestId, deviceId),
+        requestId,
+        deviceId,
+        source,
+        rawText,
+        parsedTarget: `group:${groupId}`,
+        parsedType: parsedCommand.type,
+        argsJson: JSON.stringify(parsedCommand.args),
+        status: "queued",
+        resultMessage: null,
+        errorCode: null,
+      });
+
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId,
+        source,
+        rawText,
+        parsedTarget: `group:${groupId}`,
+        parsedType: parsedCommand.type,
+        status: "queued",
+        message: null,
+      });
+    }
+
+    const results = await deps.router.dispatchToMany({
+      requestId,
+      deviceIds: targetDeviceIds,
+      command: parsedCommand,
+    });
+
+    for (const result of results) {
+      deps.db.completeCommandLog({
+        id: makeLogId(requestId, result.device_id),
+        status: result.ok ? "ok" : "failed",
+        resultMessage: result.message,
+        errorCode: result.error_code,
+      });
+
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId: result.device_id,
+        source,
+        rawText,
+        parsedTarget: `group:${groupId}`,
+        parsedType: parsedCommand.type,
+        status: result.ok ? "ok" : "failed",
+        message: result.message,
+        errorCode: result.error_code,
+      });
+    }
+
+    const okCount = results.filter((result) => result.ok).length;
+    reply.send({
+      ok: okCount === results.length,
+      request_id: requestId,
+      target: `group:${groupId}`,
+      parsed_type: parsedCommand.type,
+      message: `Completed ${okCount}/${results.length}`,
+      results: results.map((result: CommandDispatchResult) => ({
+        device_id: result.device_id,
+        ok: result.ok,
+        message: result.message,
+        error_code: result.error_code,
+      })),
     });
   });
 
@@ -551,8 +1351,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
   });
 
   server.post("/api/update", async (request, reply) => {
-    if (!isPhoneAuthorized(request, deps.config)) {
-      unauthorized(reply);
+    if (!authorize(request, reply, deps, ["updates:execute"])) {
       return;
     }
 
@@ -680,6 +1479,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
+    const updateRawText = makeUpdateRawText(target, version, resolvedPackageUrl);
     const preparedDesignationChanges = new Map<string, PreparedDesignationChange>();
     const rollbackPreparedDesignationChanges = (): void => {
       for (const designationChange of preparedDesignationChanges.values()) {
@@ -734,7 +1534,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         requestId,
         deviceId,
         source,
-        rawText: makeUpdateRawText(target, version, resolvedPackageUrl),
+        rawText: updateRawText,
         parsedTarget: target,
         parsedType: "AGENT_UPDATE",
         argsJson: JSON.stringify({
@@ -746,6 +1546,17 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         status: "queued",
         resultMessage: null,
         errorCode: null,
+      });
+
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId,
+        source,
+        rawText: updateRawText,
+        parsedTarget: target,
+        parsedType: "AGENT_UPDATE",
+        status: "queued",
+        message: null,
       });
     }
 
@@ -787,6 +1598,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           errorCode: result.error_code,
         });
 
+        publishCommandLogEvent(deps, {
+          requestId,
+          deviceId,
+          source,
+          rawText: updateRawText,
+          parsedTarget: target,
+          parsedType: "AGENT_UPDATE",
+          status: result.ok ? "ok" : "failed",
+          message: result.message,
+          errorCode: result.error_code,
+        });
+
         if (designationChange) {
           if (result.ok) {
             deps.db.deleteDevice(designationChange.currentDeviceId);
@@ -822,6 +1645,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           id: makeLogId(requestId, deviceId),
           status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
           resultMessage: dispatch.message,
+          errorCode: dispatch.code,
+        });
+
+        publishCommandLogEvent(deps, {
+          requestId,
+          deviceId,
+          source,
+          rawText: updateRawText,
+          parsedTarget: target,
+          parsedType: "AGENT_UPDATE",
+          status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
+          message: dispatch.message,
           errorCode: dispatch.code,
         });
 
@@ -889,6 +1724,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         errorCode: result.error_code,
       });
 
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId: result.device_id,
+        source,
+        rawText: updateRawText,
+        parsedTarget: target,
+        parsedType: "AGENT_UPDATE",
+        status: result.ok ? "ok" : "failed",
+        message: result.message,
+        errorCode: result.error_code,
+      });
+
       const designationChange = preparedDesignationChanges.get(result.device_id);
       if (designationChange) {
         if (result.ok) {
@@ -929,8 +1776,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
   });
 
   server.post("/api/command", async (request, reply) => {
-    if (!isPhoneAuthorized(request, deps.config)) {
-      unauthorized(reply);
+    if (!authorize(request, reply, deps, ["commands:execute"])) {
       return;
     }
 
@@ -1042,6 +1888,17 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         resultMessage: null,
         errorCode: null,
       });
+
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId,
+        source,
+        rawText: parsed.rawText,
+        parsedTarget: parsed.target,
+        parsedType: parsed.command.type,
+        status: "queued",
+        message: null,
+      });
     }
 
     if (parsed.target !== "all") {
@@ -1060,6 +1917,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           errorCode: result.error_code,
         });
 
+        publishCommandLogEvent(deps, {
+          requestId,
+          deviceId,
+          source,
+          rawText: parsed.rawText,
+          parsedTarget: parsed.target,
+          parsedType: parsed.command.type,
+          status: result.ok ? "ok" : "failed",
+          message: result.message,
+          errorCode: result.error_code,
+        });
+
         reply.send({
           ok: result.ok,
           request_id: requestId,
@@ -1075,6 +1944,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           id: makeLogId(requestId, deviceId),
           status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
           resultMessage: dispatch.message,
+          errorCode: dispatch.code,
+        });
+
+        publishCommandLogEvent(deps, {
+          requestId,
+          deviceId,
+          source,
+          rawText: parsed.rawText,
+          parsedTarget: parsed.target,
+          parsedType: parsed.command.type,
+          status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
+          message: dispatch.message,
           errorCode: dispatch.code,
         });
 
@@ -1102,6 +1983,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         id: makeLogId(requestId, result.device_id),
         status: result.ok ? "ok" : "failed",
         resultMessage: result.message,
+        errorCode: result.error_code,
+      });
+
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId: result.device_id,
+        source,
+        rawText: parsed.rawText,
+        parsedTarget: parsed.target,
+        parsedType: parsed.command.type,
+        status: result.ok ? "ok" : "failed",
+        message: result.message,
         errorCode: result.error_code,
       });
     }

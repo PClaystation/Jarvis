@@ -19,7 +19,8 @@ final class RemoteViewModel: ObservableObject {
     static let commandHistory = "cordyceps.ios.commandHistory"
   }
 
-  private static let pollIntervalNs: UInt64 = 30_000_000_000
+  private static let pollIntervalNs: UInt64 = 300_000_000_000
+  private static let eventReconnectDelayNs: UInt64 = 4_000_000_000
   private static let maxCommandHistory = 12
 
   @Published var apiBaseInput: String
@@ -42,9 +43,27 @@ final class RemoteViewModel: ObservableObject {
   @Published var showOnlyOnlineDevices = false
 
   @Published var devices: [DeviceRecord] = []
+  @Published var groups: [GroupRecord] = []
+  @Published var commandLogs: [CommandLogEntry] = []
+  @Published var nextCommandLogCursor: String?
+  @Published var historyDeviceFilterInput = ""
+  @Published var apiKeys: [APIKeyRecord] = []
+  @Published var generatedAPIKey = ""
+  @Published var groupIDInput = ""
+  @Published var groupDisplayNameInput = ""
+  @Published var groupDescriptionInput = ""
+  @Published var groupMembersInput = ""
+  @Published var apiKeyNameInput = ""
+  @Published var apiKeyScopesInput = "devices:read,commands:execute,history:read,events:read"
   @Published var recentCommands: [String]
 
   @Published var isLoadingDevices = false
+  @Published var isLoadingGroups = false
+  @Published var isLoadingHistory = false
+  @Published var isLoadingAPIKeys = false
+  @Published var isSavingGroup = false
+  @Published var isDeletingGroup = false
+  @Published var isCreatingAPIKey = false
   @Published var isTestingToken = false
   @Published var isSendingCommand = false
   @Published var isPushingUpdate = false
@@ -68,6 +87,7 @@ final class RemoteViewModel: ObservableObject {
   private let defaults = UserDefaults.standard
   private let speechController = SpeechController()
   private var pollingTask: Task<Void, Never>?
+  private var eventsTask: Task<Void, Never>?
   private var hasInitialized = false
   private var appIsActive = true
 
@@ -106,6 +126,7 @@ final class RemoteViewModel: ObservableObject {
 
   deinit {
     pollingTask?.cancel()
+    eventsTask?.cancel()
     speechController.stop()
   }
 
@@ -114,7 +135,11 @@ final class RemoteViewModel: ObservableObject {
   }
 
   var filteredActions: [CommandLibraryEntry] {
-    CommandLibrary.filteredEntries(matching: actionSearchInput)
+    CommandLibrary
+      .filteredEntries(matching: actionSearchInput)
+      .filter { action in
+        actionSupportedOnCurrentTarget(action.normalizedValue)
+      }
   }
 
   var filteredDevices: [DeviceRecord] {
@@ -170,6 +195,10 @@ final class RemoteViewModel: ObservableObject {
     selectedAction.isDangerous
   }
 
+  var selectedActionSupported: Bool {
+    actionSupportedOnCurrentTarget(selectedAction.normalizedValue)
+  }
+
   var selectedActionUsesArgument: Bool {
     selectedAction.usesArgument
   }
@@ -197,12 +226,15 @@ final class RemoteViewModel: ObservableObject {
 
     hasInitialized = true
     startPollingIfNeeded()
+    startRealtimeEventsIfNeeded()
 
     guard !tokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return
     }
 
     await loadDevices(silent: true, fromPolling: false)
+    await loadGroups(silent: true)
+    await loadCommandLogs(silent: true, append: false)
     if responseText == "No request yet." {
       setResult(message: "Devices loaded.", rawBody: "Devices loaded.", isError: false)
     }
@@ -213,6 +245,8 @@ final class RemoteViewModel: ObservableObject {
     if !isActive {
       pollingTask?.cancel()
       pollingTask = nil
+      eventsTask?.cancel()
+      eventsTask = nil
       if isListening {
         speechController.stop()
         isListening = false
@@ -222,6 +256,7 @@ final class RemoteViewModel: ObservableObject {
     }
 
     startPollingIfNeeded()
+    startRealtimeEventsIfNeeded()
   }
 
   func saveConnectionSettings() {
@@ -245,12 +280,13 @@ final class RemoteViewModel: ObservableObject {
     connectionState = token.isEmpty ? .disconnected : .retrying
     commandText = composeCommand()
     startPollingIfNeeded()
+    startRealtimeEventsIfNeeded()
     setStatus("Connection settings saved.", isError: false)
     setResult(message: "Connection settings saved on this device.", rawBody: "Connection settings saved on this device.", isError: false)
   }
 
   func persistUpdateSettings() {
-    let target = normalizeExplicitTarget(updateTargetInput)
+    let target = normalizeExplicitUpdateTarget(updateTargetInput)
     let version = updateVersionInput.trimmingCharacters(in: .whitespacesAndNewlines)
     let url = updateURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
     let sha = updateShaInput.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -358,6 +394,272 @@ final class RemoteViewModel: ObservableObject {
     }
   }
 
+  func loadGroups(silent: Bool = false) async {
+    if isLoadingGroups {
+      return
+    }
+
+    isLoadingGroups = true
+    defer { isLoadingGroups = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.loadGroups(config: config)
+      groups = response.body.groups.sorted {
+        $0.display_name.localizedCaseInsensitiveCompare($1.display_name) == .orderedAscending
+      }
+      connectionState = .connected
+
+      if !silent {
+        setStatus("Loaded \(groups.count) groups.", isError: false)
+        setResult(
+          message: "Groups loaded.",
+          rawBody: response.rawJSON,
+          requestID: "-",
+          latencyMs: response.latencyMs,
+          isError: false
+        )
+      }
+    } catch {
+      if !silent {
+        handle(error: error, silent: false, fromPolling: false)
+      }
+    }
+  }
+
+  func loadCommandLogs(silent: Bool = false, append: Bool = false) async {
+    if isLoadingHistory {
+      return
+    }
+
+    isLoadingHistory = true
+    defer { isLoadingHistory = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.loadCommandLogs(
+        config: config,
+        limit: 40,
+        before: append ? nextCommandLogCursor : nil,
+        deviceID: historyDeviceFilterInput.trimmed.isEmpty ? nil : historyDeviceFilterInput.normalizedActionText
+      )
+
+      if append {
+        var seen = Set(commandLogs.map(\.id))
+        for entry in response.body.logs where !seen.contains(entry.id) {
+          commandLogs.append(entry)
+          seen.insert(entry.id)
+        }
+      } else {
+        commandLogs = response.body.logs
+      }
+
+      nextCommandLogCursor = response.body.next_before
+
+      if !silent {
+        setStatus("Loaded \(response.body.logs.count) history entries.", isError: false)
+        setResult(
+          message: "Command history loaded.",
+          rawBody: response.rawJSON,
+          requestID: "-",
+          latencyMs: response.latencyMs,
+          isError: false
+        )
+      }
+    } catch {
+      if !silent {
+        handle(error: error, silent: false, fromPolling: false)
+      }
+    }
+  }
+
+  func loadAPIKeys(silent: Bool = false) async {
+    if isLoadingAPIKeys {
+      return
+    }
+
+    isLoadingAPIKeys = true
+    defer { isLoadingAPIKeys = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.listAPIKeys(config: config)
+      apiKeys = response.body.keys
+
+      if !silent {
+        setStatus("Loaded \(apiKeys.count) API keys.", isError: false)
+        setResult(
+          message: "API keys loaded.",
+          rawBody: response.rawJSON,
+          requestID: "-",
+          latencyMs: response.latencyMs,
+          isError: false
+        )
+      }
+    } catch {
+      if !silent {
+        handle(error: error, silent: false, fromPolling: false)
+      }
+    }
+  }
+
+  func saveGroup() async {
+    guard !isSavingGroup else {
+      return
+    }
+
+    let groupID = groupIDInput.normalizedActionText
+    let displayName = groupDisplayNameInput.trimmed
+    let description = groupDescriptionInput.trimmed
+    let memberIDs = groupMembersInput
+      .split(separator: ",")
+      .map { String($0).normalizedActionText }
+      .filter { !$0.isEmpty }
+
+    guard !groupID.isEmpty else {
+      setStatus("Group ID is required.", isError: true)
+      return
+    }
+
+    guard !displayName.isEmpty else {
+      setStatus("Group name is required.", isError: true)
+      return
+    }
+
+    isSavingGroup = true
+    defer { isSavingGroup = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.upsertGroup(
+        config: config,
+        groupID: groupID,
+        displayName: displayName,
+        description: description.isEmpty ? nil : description,
+        deviceIDs: memberIDs
+      )
+
+      await loadGroups(silent: true)
+      setStatus(response.body.message ?? "Group saved.", isError: false)
+      setResult(
+        message: response.body.message ?? "Group saved.",
+        rawBody: response.rawJSON,
+        requestID: "-",
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
+  func deleteGroup() async {
+    guard !isDeletingGroup else {
+      return
+    }
+
+    let groupID = groupIDInput.normalizedActionText
+    guard !groupID.isEmpty else {
+      setStatus("Group ID is required.", isError: true)
+      return
+    }
+
+    isDeletingGroup = true
+    defer { isDeletingGroup = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.deleteGroup(config: config, groupID: groupID)
+      await loadGroups(silent: true)
+      setStatus(response.body.message ?? "Group deleted.", isError: false)
+      setResult(
+        message: response.body.message ?? "Group deleted.",
+        rawBody: response.rawJSON,
+        requestID: "-",
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
+  func useGroupAsTarget(_ groupID: String) {
+    let normalized = groupID.normalizedActionText
+    guard !normalized.isEmpty else {
+      return
+    }
+
+    targetInput = "group:\(normalized)"
+    defaults.set(targetInput, forKey: DefaultsKey.target)
+    composeFromInputs()
+  }
+
+  func selectGroupForEditing(_ group: GroupRecord) {
+    groupIDInput = group.group_id
+    groupDisplayNameInput = group.display_name
+    groupDescriptionInput = group.description ?? ""
+    groupMembersInput = group.device_ids.joined(separator: ",")
+  }
+
+  func createAPIKey() async {
+    guard !isCreatingAPIKey else {
+      return
+    }
+
+    let name = apiKeyNameInput.trimmed
+    let scopes = apiKeyScopesInput
+      .split(separator: ",")
+      .map { String($0).normalizedActionText }
+      .filter { !$0.isEmpty }
+
+    guard !name.isEmpty else {
+      setStatus("API key name is required.", isError: true)
+      return
+    }
+
+    guard !scopes.isEmpty else {
+      setStatus("At least one API scope is required.", isError: true)
+      return
+    }
+
+    isCreatingAPIKey = true
+    defer { isCreatingAPIKey = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.createAPIKey(config: config, name: name, scopes: scopes)
+      generatedAPIKey = response.body.api_key ?? ""
+      await loadAPIKeys(silent: true)
+      setStatus("API key created.", isError: false)
+      setResult(
+        message: "API key created.",
+        rawBody: response.rawJSON,
+        requestID: "-",
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
+  func revokeAPIKey(_ keyID: String) async {
+    let normalized = keyID.trimmed
+    guard !normalized.isEmpty else {
+      return
+    }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      _ = try await CordycepsClient.revokeAPIKey(config: config, keyID: normalized)
+      await loadAPIKeys(silent: true)
+      setStatus("Revoked key \(normalized).", isError: false)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
   func testToken() async {
     guard !isTestingToken else {
       return
@@ -372,6 +674,8 @@ final class RemoteViewModel: ObservableObject {
       let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
       let response = try await CordycepsClient.loadDevices(config: config)
       devices = sortedDevices(response.body.devices)
+      let groupsResponse = try await CordycepsClient.loadGroups(config: config)
+      groups = groupsResponse.body.groups
       connectionState = .connected
       setStatus("Token valid. Device list loaded.", isError: false)
       setResult(
@@ -383,6 +687,7 @@ final class RemoteViewModel: ObservableObject {
       )
       triggerFeedback(.success)
       startPollingIfNeeded()
+      startRealtimeEventsIfNeeded()
     } catch {
       handle(error: error, silent: false, fromPolling: false)
     }
@@ -396,6 +701,16 @@ final class RemoteViewModel: ObservableObject {
       return
     }
 
+    if !selectedActionSupported {
+      setStatus("Selected action is not supported by the current target.", isError: true)
+      setResult(
+        message: "Selected action is not supported by the current target.",
+        rawBody: "Selected action is not supported by the current target.",
+        isError: true
+      )
+      return
+    }
+
     guard !isSendingCommand else {
       return
     }
@@ -405,7 +720,23 @@ final class RemoteViewModel: ObservableObject {
 
     do {
       let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
-      let response = try await CordycepsClient.sendCommand(config: config, text: text)
+      let normalizedTarget = normalizeExplicitTarget(targetInput)
+      let isGroupTarget = normalizedTarget.hasPrefix("group:")
+      let groupID = isGroupTarget ? String(normalizedTarget.dropFirst("group:".count)) : ""
+      let actionText = groupCommandText(from: text, target: normalizedTarget)
+      let requiresBulkConfirm = isGroupTarget && selectedActionValue.normalizedActionText != "ping"
+
+      let response: APIResponse<CommandResponse>
+      if isGroupTarget {
+        response = try await CordycepsClient.sendGroupCommand(
+          config: config,
+          groupID: groupID,
+          text: actionText,
+          confirmBulk: requiresBulkConfirm
+        )
+      } else {
+        response = try await CordycepsClient.sendCommand(config: config, text: text)
+      }
       connectionState = .connected
 
       let isError = response.body.ok == false
@@ -425,6 +756,7 @@ final class RemoteViewModel: ObservableObject {
         latencyMs: response.latencyMs,
         isError: isError
       )
+      await loadCommandLogs(silent: true, append: false)
     } catch {
       handle(error: error, silent: false, fromPolling: false)
     }
@@ -437,7 +769,7 @@ final class RemoteViewModel: ObservableObject {
 
     persistUpdateSettings()
 
-    let target = normalizeExplicitTarget(updateTargetInput)
+    let target = normalizeExplicitUpdateTarget(updateTargetInput)
     let version = updateVersionInput
     let packageURL = updateURLInput
     let sha = updateShaInput.isEmpty ? nil : updateShaInput
@@ -588,7 +920,7 @@ final class RemoteViewModel: ObservableObject {
     }
 
     if !updateTarget.isEmpty {
-      let normalizedUpdateTarget = normalizeExplicitTarget(updateTarget)
+      let normalizedUpdateTarget = normalizeExplicitUpdateTarget(updateTarget)
       if !normalizedUpdateTarget.isEmpty {
         updateTargetInput = normalizedUpdateTarget
         defaults.set(normalizedUpdateTarget, forKey: DefaultsKey.updateTarget)
@@ -652,6 +984,7 @@ final class RemoteViewModel: ObservableObject {
 
     connectionState = tokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .disconnected : .retrying
     startPollingIfNeeded()
+    startRealtimeEventsIfNeeded()
 
     if applied {
       pairingLinkInput = ""
@@ -765,6 +1098,95 @@ final class RemoteViewModel: ObservableObject {
     }
   }
 
+  private func startRealtimeEventsIfNeeded() {
+    eventsTask?.cancel()
+    eventsTask = nil
+
+    guard appIsActive else {
+      return
+    }
+
+    guard !tokenInput.trimmed.isEmpty else {
+      return
+    }
+
+    guard CordycepsClient.normalizeBaseURL(from: apiBaseInput) != nil else {
+      return
+    }
+
+    eventsTask = Task { [weak self] in
+      await self?.runEventLoop()
+    }
+  }
+
+  private func runEventLoop() async {
+    while !Task.isCancelled {
+      do {
+        let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+        let request = try CordycepsClient.makeRequest(config: config, path: "/api/events", method: "GET")
+        let (bytes, _) = try await URLSession.shared.bytes(for: request)
+
+        connectionState = .connected
+        var currentEvent = "message"
+        var dataLines: [String] = []
+
+        for try await line in bytes.lines {
+          if Task.isCancelled {
+            return
+          }
+
+          if line.hasPrefix("event:") {
+            currentEvent = String(line.dropFirst("event:".count)).trimmed
+            continue
+          }
+
+          if line.hasPrefix("data:") {
+            dataLines.append(String(line.dropFirst("data:".count)).trimmed)
+            continue
+          }
+
+          if line.isEmpty {
+            let payload = dataLines.joined()
+            if !payload.isEmpty {
+              await handleRealtimeEvent(name: currentEvent, payload: payload)
+            }
+            currentEvent = "message"
+            dataLines = []
+          }
+        }
+      } catch {
+        if Task.isCancelled {
+          return
+        }
+
+        connectionState = .retrying
+        try? await Task.sleep(nanoseconds: Self.eventReconnectDelayNs)
+      }
+    }
+  }
+
+  private func handleRealtimeEvent(name: String, payload: String) async {
+    switch name {
+    case "ready", "ping":
+      connectionState = .connected
+    case "device_status":
+      await loadDevices(silent: true, fromPolling: true)
+      await loadGroups(silent: true)
+    case "command_log":
+      guard let data = payload.data(using: .utf8) else {
+        return
+      }
+
+      guard let event = try? JSONDecoder().decode(CommandLogRealtimeEvent.self, from: data) else {
+        return
+      }
+
+      upsertCommandLog(event.asCommandLogEntry())
+    default:
+      break
+    }
+  }
+
   private func startPollingIfNeeded() {
     pollingTask?.cancel()
     pollingTask = nil
@@ -803,6 +1225,7 @@ final class RemoteViewModel: ObservableObject {
         }
 
         await self.loadDevices(silent: true, fromPolling: true)
+        await self.loadGroups(silent: true)
       }
     }
   }
@@ -831,6 +1254,125 @@ final class RemoteViewModel: ObservableObject {
     return "\(target) \(action)"
   }
 
+  private func actionSupportedOnCurrentTarget(_ actionValue: String) -> Bool {
+    let required = requiredCapability(for: actionValue)
+    guard !required.isEmpty else {
+      return true
+    }
+
+    guard let capabilities = capabilitiesForCurrentTarget() else {
+      return true
+    }
+
+    return capabilities.contains(required)
+  }
+
+  private func requiredCapability(for actionValue: String) -> String {
+    let normalized = actionValue.normalizedActionText
+    if ["play", "pause", "play pause", "next", "previous", "volume up", "volume down", "mute"].contains(normalized) {
+      return "media_control"
+    }
+
+    if normalized.hasPrefix("open ") {
+      return "open_app"
+    }
+
+    if ["lock", "lock pc"].contains(normalized) {
+      return "locking"
+    }
+
+    if ["notify"].contains(normalized) {
+      return "notifications"
+    }
+
+    if ["clipboard", "copy"].contains(normalized) {
+      return "clipboard_control"
+    }
+
+    if ["display off", "screen off", "monitor off"].contains(normalized) {
+      return "display_control"
+    }
+
+    if ["sleep", "sleep pc", "shutdown", "restart"].contains(normalized) {
+      return "power_control"
+    }
+
+    if ["sign out", "log out", "logout"].contains(normalized) {
+      return "session_control"
+    }
+
+    if ["panic confirm"].contains(normalized) {
+      return "emergency_lockdown"
+    }
+
+    return ""
+  }
+
+  private func capabilitiesForCurrentTarget() -> Set<String>? {
+    let target = normalizeExplicitTarget(targetInput)
+    guard !target.isEmpty, target != "all" else {
+      return nil
+    }
+
+    if target.hasPrefix("group:") {
+      let groupID = String(target.dropFirst("group:".count))
+      guard let group = groups.first(where: { $0.group_id.normalizedActionText == groupID.normalizedActionText }) else {
+        return nil
+      }
+
+      var intersection: Set<String>?
+      for memberID in group.device_ids {
+        guard let device = devices.first(where: { $0.device_id.normalizedActionText == memberID.normalizedActionText }) else {
+          continue
+        }
+
+        let capabilities = Set((device.capabilities ?? []).map { $0.normalizedActionText })
+        if let current = intersection {
+          intersection = current.intersection(capabilities)
+        } else {
+          intersection = capabilities
+        }
+      }
+
+      return intersection
+    }
+
+    guard let device = devices.first(where: { $0.device_id.normalizedActionText == target.normalizedActionText }) else {
+      return nil
+    }
+
+    return Set((device.capabilities ?? []).map { $0.normalizedActionText })
+  }
+
+  private func groupCommandText(from rawText: String, target: String) -> String {
+    let trimmed = rawText.trimmed
+    guard !trimmed.isEmpty else {
+      return ""
+    }
+
+    let normalizedTarget = target.normalizedActionText
+    let normalizedText = trimmed.normalizedActionText
+    if normalizedText.hasPrefix("\(normalizedTarget) ") {
+      if let split = trimmed.firstIndex(of: " ") {
+        return String(trimmed[trimmed.index(after: split)...]).trimmed
+      }
+    }
+
+    return trimmed
+  }
+
+  private func upsertCommandLog(_ entry: CommandLogEntry) {
+    if let existing = commandLogs.firstIndex(where: { $0.id == entry.id }) {
+      commandLogs[existing] = entry
+      return
+    }
+
+    commandLogs.insert(entry, at: 0)
+    if commandLogs.count > 120 {
+      commandLogs = Array(commandLogs.prefix(120))
+    }
+  }
+
   private func normalizeTarget(_ input: String) -> String {
     let normalized = normalizeExplicitTarget(input)
     if normalized.isEmpty {
@@ -847,8 +1389,16 @@ final class RemoteViewModel: ObservableObject {
     return normalized
   }
 
+  private func normalizeExplicitUpdateTarget(_ input: String) -> String {
+    let normalized = input.normalizedActionText
+    guard normalized.range(of: #"^(all|[a-z][a-z0-9_-]{1,31})$"#, options: .regularExpression) != nil else {
+      return ""
+    }
+    return normalized
+  }
+
   private func isValidTarget(_ value: String) -> Bool {
-    value.range(of: #"^(all|m[a-z0-9_-]{1,31})$"#, options: .regularExpression) != nil
+    value.range(of: #"^(all|[a-z][a-z0-9_-]{1,31}|group:[a-z][a-z0-9_-]{1,31})$"#, options: .regularExpression) != nil
   }
 
   private func isValidSHA256(_ value: String) -> Bool {
@@ -1051,6 +1601,37 @@ final class RemoteViewModel: ObservableObject {
         }
       }
     }
+  }
+}
+
+private struct CommandLogRealtimeEvent: Decodable {
+  let request_id: String
+  let device_id: String
+  let source: String
+  let raw_text: String
+  let parsed_target: String
+  let parsed_type: String
+  let status: String
+  let message: String?
+  let error_code: String?
+  let ts: String
+
+  func asCommandLogEntry() -> CommandLogEntry {
+    let identifier = "\(request_id):\(device_id)"
+    return CommandLogEntry(
+      id: identifier,
+      request_id: request_id,
+      device_id: device_id,
+      source: source,
+      raw_text: raw_text,
+      parsed_target: parsed_target,
+      parsed_type: parsed_type,
+      status: status,
+      result_message: message,
+      error_code: error_code,
+      created_at: ts,
+      completed_at: ts
+    )
   }
 }
 

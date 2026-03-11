@@ -20,6 +20,7 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
   let version: String?
   let hostname: String?
   let username: String?
+  let capabilities: [String]?
 
   var id: String { device_id }
 
@@ -69,6 +70,77 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
 struct DevicesResponse: Decodable {
   let ok: Bool
   let devices: [DeviceRecord]
+}
+
+struct CommandLogEntry: Decodable, Identifiable, Hashable {
+  let id: String
+  let request_id: String
+  let device_id: String
+  let source: String
+  let raw_text: String
+  let parsed_target: String
+  let parsed_type: String
+  let status: String
+  let result_message: String?
+  let error_code: String?
+  let created_at: String
+  let completed_at: String?
+}
+
+struct CommandLogsResponse: Decodable {
+  let ok: Bool
+  let count: Int?
+  let next_before: String?
+  let logs: [CommandLogEntry]
+}
+
+struct GroupRecord: Decodable, Identifiable, Hashable {
+  let group_id: String
+  let display_name: String
+  let description: String?
+  let device_ids: [String]
+  let online_count: Int?
+  let created_at: String?
+  let updated_at: String?
+
+  var id: String { group_id }
+}
+
+struct GroupsResponse: Decodable {
+  let ok: Bool
+  let groups: [GroupRecord]
+}
+
+struct GroupResponse: Decodable {
+  let ok: Bool
+  let group: GroupRecord?
+  let message: String?
+  let error_code: String?
+}
+
+struct APIKeyRecord: Decodable, Identifiable, Hashable {
+  let key_id: String
+  let name: String
+  let scopes: [String]
+  let status: String
+  let created_at: String
+  let updated_at: String
+  let last_used_at: String?
+
+  var id: String { key_id }
+}
+
+struct APIKeysResponse: Decodable {
+  let ok: Bool
+  let keys: [APIKeyRecord]
+}
+
+struct APIKeyCreateResponse: Decodable {
+  let ok: Bool
+  let key: APIKeyRecord?
+  let api_key: String?
+  let message: String?
+  let error_code: String?
 }
 
 struct DispatchResult: Decodable, Hashable {
@@ -128,6 +200,24 @@ struct UpdateRequest: Encodable {
   let package_url: String
   let sha256: String?
   let size_bytes: Int?
+}
+
+struct GroupUpsertRequest: Encodable {
+  let display_name: String
+  let description: String?
+  let device_ids: [String]
+}
+
+struct GroupCommandRequest: Encodable {
+  let request_id: String
+  let text: String
+  let source: String
+  let confirm_bulk: Bool
+}
+
+struct APIKeyCreateRequest: Encodable {
+  let name: String
+  let scopes: [String]
 }
 
 struct APIResponse<T> {

@@ -8,12 +8,14 @@ import type {
 import type { Database } from "../db/database";
 import { CommandRouter } from "../router/commandRouter";
 import { DeviceRegistry } from "./deviceRegistry";
+import { EventHub } from "../events/eventHub";
 import { log } from "../utils/logger";
 
 interface RealtimeDeps {
   db: Database;
   registry: DeviceRegistry;
   router: CommandRouter;
+  eventHub: EventHub;
   wsAuthTimeoutMs: number;
   wsPingIntervalMs: number;
   wsMaxMessageBytes: number;
@@ -362,6 +364,15 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
             capabilities: hello.capabilities,
           });
 
+          deps.eventHub.publish("device_status", {
+            device_id: hello.device_id,
+            status: "online",
+            version: hello.version,
+            hostname: hello.hostname,
+            username: hello.username,
+            capabilities: hello.capabilities,
+          });
+
           safeSendJson(socket, {
             kind: "hello_ack",
             server_time: new Date().toISOString(),
@@ -427,6 +438,16 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
               device_id: result.device_id,
               request_id: result.request_id,
             });
+          } else {
+            deps.eventHub.publish("agent_result", {
+              request_id: result.request_id,
+              device_id: result.device_id,
+              ok: result.ok,
+              message: result.message,
+              error_code: result.error_code ?? null,
+              completed_at: result.completed_at,
+              version: result.version ?? null,
+            });
           }
 
           return;
@@ -464,6 +485,10 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
       deps.registry.disconnect(activeDeviceId);
       deps.db.markDeviceOffline(activeDeviceId);
       deps.router.clearDevicePending(activeDeviceId);
+      deps.eventHub.publish("device_status", {
+        device_id: activeDeviceId,
+        status: "offline",
+      });
 
       log("info", "Agent disconnected", {
         device_id: activeDeviceId,
