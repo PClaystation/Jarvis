@@ -26,8 +26,8 @@ class MockSocket {
 }
 
 class FakeRouter {
-  public dispatchedMany: Array<{ requestId: string; deviceIds: string[]; type: string }> = [];
-  public dispatchedToDevice: Array<{ requestId: string; deviceId: string; type: string }> = [];
+  public dispatchedMany: Array<{ requestId: string; deviceIds: string[]; type: string; args: Record<string, unknown> }> = [];
+  public dispatchedToDevice: Array<{ requestId: string; deviceId: string; type: string; args: Record<string, unknown> }> = [];
 
   public pendingCount(): number {
     return 0;
@@ -36,7 +36,7 @@ class FakeRouter {
   public async dispatchToDevice(input: {
     requestId: string;
     deviceId: string;
-    command: { type: string };
+    command: { type: string; args?: Record<string, unknown> };
   }): Promise<{
     request_id: string;
     device_id: string;
@@ -44,7 +44,12 @@ class FakeRouter {
     message: string;
     completed_at: string;
   }> {
-    this.dispatchedToDevice.push({ requestId: input.requestId, deviceId: input.deviceId, type: input.command.type });
+    this.dispatchedToDevice.push({
+      requestId: input.requestId,
+      deviceId: input.deviceId,
+      type: input.command.type,
+      args: input.command.args ?? {},
+    });
     return {
       request_id: input.requestId,
       device_id: input.deviceId,
@@ -57,7 +62,7 @@ class FakeRouter {
   public async dispatchToMany(input: {
     requestId: string;
     deviceIds: string[];
-    command: { type: string };
+    command: { type: string; args?: Record<string, unknown> };
   }): Promise<Array<{
     request_id: string;
     device_id: string;
@@ -65,7 +70,12 @@ class FakeRouter {
     message: string;
     completed_at: string;
   }>> {
-    this.dispatchedMany.push({ requestId: input.requestId, deviceIds: [...input.deviceIds], type: input.command.type });
+    this.dispatchedMany.push({
+      requestId: input.requestId,
+      deviceIds: [...input.deviceIds],
+      type: input.command.type,
+      args: input.command.args ?? {},
+    });
     return input.deviceIds.map((deviceId) => ({
       request_id: input.requestId,
       device_id: deviceId,
@@ -97,6 +107,8 @@ function makeConfig(): AppConfig {
     sqlitePath: "",
     sqlitePathSource: "default",
     commandTimeoutMs: 1000,
+    adminCommandTimeoutMs: 60_000,
+    powerCommandTimeoutMs: 15_000,
     maxPendingCommands: 100,
     heartbeatTtlMs: 90_000,
     wsAuthTimeoutMs: 10_000,
@@ -607,6 +619,132 @@ test("group command requires explicit bulk confirmation", async () => {
     assert.equal(body.ok, true);
     assert.equal(router.dispatchedMany.length, 1);
     assert.deepEqual(router.dispatchedMany[0].deviceIds, ["m1"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("group command performs partial dispatch and reports skipped members", async () => {
+  const harness = await createHarness();
+  const { server, router, db, cleanup } = harness;
+
+  try {
+    db.enrollDevice({
+      deviceId: "m2",
+      tokenHash: sha256Hex("m2-token"),
+      displayName: "m2",
+      version: "1.0.0",
+      hostname: "host",
+      username: "user",
+      capabilities: ["media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
+    });
+
+    const createGroup = await server.inject({
+      method: "PUT",
+      url: "/api/groups/mixed",
+      headers: authHeaders("owner-token"),
+      payload: {
+        display_name: "Mixed",
+        description: "Mixed availability",
+        device_ids: ["m1", "m2"],
+      },
+    });
+    assert.equal(createGroup.statusCode, 200);
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/groups/mixed/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "ping",
+        confirm_bulk: false,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.ok, false);
+    assert.equal(router.dispatchedMany.length, 1);
+    assert.deepEqual(router.dispatchedMany[0].deviceIds, ["m1"]);
+    assert.equal(Array.isArray(body.results), true);
+    assert.equal(body.results.length, 2);
+    assert.equal(body.results.some((item: { device_id: string; error_code?: string }) => item.device_id === "m2" && item.error_code === "DEVICE_OFFLINE"), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("device app aliases rewrite open command target", async () => {
+  const harness = await createHarness();
+  const { server, router, cleanup } = harness;
+
+  try {
+    const saveAliases = await server.inject({
+      method: "PUT",
+      url: "/api/devices/m1/app-aliases",
+      headers: authHeaders("owner-token"),
+      payload: {
+        aliases: [{ alias: "browser work", app: "chrome" }],
+      },
+    });
+    assert.equal(saveAliases.statusCode, 200);
+
+    const dispatch = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 open browser work",
+      },
+    });
+
+    assert.equal(dispatch.statusCode, 200);
+    assert.equal(router.dispatchedToDevice.length, 1);
+    assert.equal(router.dispatchedToDevice[0].type, "OPEN_APP");
+    assert.deepEqual(router.dispatchedToDevice[0].args, { app: "chrome" });
+  } finally {
+    await cleanup();
+  }
+});
+
+test("single-device async dispatch returns accepted and job is queryable", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const requestId = "req-async-1";
+    const accepted = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        request_id: requestId,
+        text: "m1 ping",
+        async: true,
+      },
+    });
+
+    assert.equal(accepted.statusCode, 202);
+    const acceptedBody = accepted.json();
+    assert.equal(acceptedBody.ok, true);
+    assert.equal(acceptedBody.job_id, requestId);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const job = await server.inject({
+      method: "GET",
+      url: `/api/command-jobs/${requestId}`,
+      headers: {
+        authorization: "Bearer owner-token",
+      },
+    });
+
+    assert.equal(job.statusCode, 200);
+    const jobBody = job.json();
+    assert.equal(jobBody.request_id, requestId);
+    assert.equal(jobBody.done, true);
+    assert.equal(Array.isArray(jobBody.logs), true);
+    assert.equal(jobBody.logs.length >= 1, true);
   } finally {
     await cleanup();
   }

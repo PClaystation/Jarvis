@@ -6,6 +6,10 @@ const loadDevicesBtn = document.getElementById("loadDevicesBtn");
 const renameDeviceInput = document.getElementById("renameDeviceInput");
 const renameDisplayNameInput = document.getElementById("renameDisplayNameInput");
 const renameDeviceBtn = document.getElementById("renameDeviceBtn");
+const aliasDeviceInput = document.getElementById("aliasDeviceInput");
+const aliasKeyInput = document.getElementById("aliasKeyInput");
+const aliasAppInput = document.getElementById("aliasAppInput");
+const saveAliasBtn = document.getElementById("saveAliasBtn");
 const deviceSummary = document.getElementById("deviceSummary");
 const deviceCards = document.getElementById("deviceCards");
 const deviceList = document.getElementById("deviceList");
@@ -78,6 +82,7 @@ const BOOTSTRAP_COMMAND_KEY = "cordyceps_bootstrap_command";
 const BOOTSTRAP_ACTION_KEY = "cordyceps_bootstrap_action";
 const BOOTSTRAP_ARG_KEY = "cordyceps_bootstrap_arg";
 const LAST_ACTION_KEY = "cordyceps_last_action";
+const ALIAS_DEVICE_KEY = "cordyceps_alias_device";
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 const GROUP_TARGET_RE = /^group:([a-z][a-z0-9_-]{1,31})$/;
 
@@ -765,6 +770,10 @@ function setTarget(deviceId) {
   if (renameDeviceInput) {
     renameDeviceInput.value = deviceId;
   }
+  if (aliasDeviceInput && !parseGroupTarget(deviceId) && deviceId !== "all") {
+    aliasDeviceInput.value = deviceId;
+    localStorage.setItem(ALIAS_DEVICE_KEY, deviceId);
+  }
   refreshActionAvailability();
 }
 
@@ -1108,6 +1117,56 @@ async function renameDevice() {
   setResult(data, { requestId: deviceId, latencyMs });
 }
 
+async function saveDeviceAlias() {
+  if (!aliasDeviceInput || !aliasKeyInput || !aliasAppInput) {
+    throw new Error("Alias controls are not available in this app build.");
+  }
+
+  const deviceId = normalizeActionText(aliasDeviceInput.value);
+  const alias = normalizeActionText(aliasKeyInput.value);
+  const app = normalizeActionText(aliasAppInput.value);
+  if (!deviceId) {
+    throw new Error("Alias device ID is required.");
+  }
+  if (!alias) {
+    throw new Error("Alias phrase is required.");
+  }
+  if (!app) {
+    throw new Error("Canonical app is required.");
+  }
+
+  localStorage.setItem(ALIAS_DEVICE_KEY, deviceId);
+
+  const existing = await apiRequest(`/api/devices/${encodeURIComponent(deviceId)}/app-aliases`, null, { method: "GET" });
+  const existingAliases = Array.isArray(existing.data?.aliases) ? existing.data.aliases : [];
+  const merged = [];
+  let updated = false;
+
+  for (const entry of existingAliases) {
+    const entryAlias = normalizeActionText(entry.alias);
+    if (!entryAlias) {
+      continue;
+    }
+
+    if (entryAlias === alias) {
+      merged.push({ alias, app });
+      updated = true;
+    } else {
+      merged.push({ alias: entryAlias, app: normalizeActionText(entry.app) });
+    }
+  }
+
+  if (!updated) {
+    merged.push({ alias, app });
+  }
+
+  const { data, latencyMs } = await apiRequest(`/api/devices/${encodeURIComponent(deviceId)}/app-aliases`, {
+    aliases: merged,
+  }, { method: "PUT" });
+
+  setResult(data, { requestId: deviceId, latencyMs });
+}
+
 async function loadDevices(options = {}) {
   const { data } = await apiRequest("/api/devices", null, { method: "GET" });
   if (!data.ok) {
@@ -1370,6 +1429,8 @@ async function sendAdminCommand() {
     request_id: requestId,
     text: `${target} admin ${action} ${commandValue}`,
     source: "pwa-admin",
+    async: true,
+    timeout_ms: 120000,
     sent_at: new Date().toISOString(),
     client_version: "pwa-v2",
   };
@@ -1428,6 +1489,7 @@ async function sendCommand() {
     request_id: requestId,
     text,
     source: "pwa",
+    async: true,
     sent_at: new Date().toISOString(),
     client_version: "pwa-v2",
   };
@@ -1562,6 +1624,7 @@ function connectEventStream() {
       raw_text: payload.raw_text,
       status: payload.status,
       result_message: payload.message,
+      result_payload: payload.result_payload,
       error_code: payload.error_code,
       created_at: payload.ts,
       completed_at: payload.ts,
@@ -1746,6 +1809,10 @@ function init() {
     adminShellSelect.value = normalizeAdminShell(localStorage.getItem(ADMIN_SHELL_KEY) || "cmd");
   }
 
+  if (aliasDeviceInput) {
+    aliasDeviceInput.value = localStorage.getItem(ALIAS_DEVICE_KEY) || targetInput.value || "m1";
+  }
+
   renderActionOptions("");
 
   const bootstrapAction = localStorage.getItem(BOOTSTRAP_ACTION_KEY);
@@ -1794,6 +1861,10 @@ function init() {
 
   targetInput.addEventListener("change", () => {
     localStorage.setItem(TARGET_KEY, normalizeActionText(targetInput.value));
+    if (aliasDeviceInput && !parseGroupTarget(targetInput.value) && normalizeActionText(targetInput.value) !== "all") {
+      aliasDeviceInput.value = normalizeActionText(targetInput.value);
+      localStorage.setItem(ALIAS_DEVICE_KEY, normalizeActionText(targetInput.value));
+    }
     if (updateTargetInput && !localStorage.getItem(UPDATE_TARGET_KEY) && updateTargetInput.value.trim() === "") {
       updateTargetInput.value = normalizeActionText(targetInput.value);
     }
@@ -1862,6 +1933,24 @@ function init() {
       } finally {
         renameDeviceBtn.disabled = false;
         renameDeviceBtn.textContent = "Save Name";
+      }
+    });
+  }
+
+  if (saveAliasBtn) {
+    saveAliasBtn.addEventListener("click", async () => {
+      try {
+        saveAliasBtn.disabled = true;
+        saveAliasBtn.textContent = "Saving...";
+        await saveDeviceAlias();
+        setAuthHint("Device app alias saved.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
+      } finally {
+        saveAliasBtn.disabled = false;
+        saveAliasBtn.textContent = "Save Alias";
       }
     });
   }

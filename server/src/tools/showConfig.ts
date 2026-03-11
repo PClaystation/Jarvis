@@ -50,6 +50,8 @@ const output = {
   public_ws_url: config.publicWsUrl,
   pwa_public_url: config.pwaPublicUrl,
   command_timeout_ms: config.commandTimeoutMs,
+  admin_command_timeout_ms: config.adminCommandTimeoutMs,
+  power_command_timeout_ms: config.powerCommandTimeoutMs,
   update_command_timeout_ms: config.updateCommandTimeoutMs,
   update_metadata_timeout_ms: config.updateMetadataTimeoutMs,
   update_max_package_bytes: config.updateMaxPackageBytes,

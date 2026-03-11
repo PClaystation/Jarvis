@@ -283,6 +283,8 @@ export interface AppConfig {
   sqlitePath: string;
   sqlitePathSource: PathSource;
   commandTimeoutMs: number;
+  adminCommandTimeoutMs: number;
+  powerCommandTimeoutMs: number;
   maxPendingCommands: number;
   heartbeatTtlMs: number;
   wsAuthTimeoutMs: number;
@@ -310,7 +312,9 @@ export function loadConfig(): AppConfig {
       ])
     : resolveDefaultSqlitePath(serverRoot);
   const secrets = resolveSecrets(sqliteResolution.path, serverRoot);
-  const commandTimeoutMs = readInt("COMMAND_TIMEOUT_MS", 5000);
+  const commandTimeoutMs = readInt("COMMAND_TIMEOUT_MS", 12000);
+  const adminCommandTimeoutMs = readInt("ADMIN_COMMAND_TIMEOUT_MS", 60000);
+  const powerCommandTimeoutMs = readInt("POWER_COMMAND_TIMEOUT_MS", 15000);
   const maxPendingCommands = readInt("MAX_PENDING_COMMANDS", 1000);
   const heartbeatTtlMs = readInt("HEARTBEAT_TTL_MS", 90000);
   const wsAuthTimeoutMs = readInt("WS_AUTH_TIMEOUT_MS", 10000);
@@ -336,6 +340,8 @@ export function loadConfig(): AppConfig {
     sqlitePath: sqliteResolution.path,
     sqlitePathSource: sqliteResolution.source,
     commandTimeoutMs,
+    adminCommandTimeoutMs,
+    powerCommandTimeoutMs,
     maxPendingCommands,
     heartbeatTtlMs,
     wsAuthTimeoutMs,

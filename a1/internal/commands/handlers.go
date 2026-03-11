@@ -79,11 +79,12 @@ func Capabilities() []string {
 
 func Execute(deviceID string, version string, command protocol.CommandEnvelope) (result protocol.ResultMessage) {
 	result = protocol.ResultMessage{
-		Kind:        "result",
-		RequestID:   command.RequestID,
-		DeviceID:    deviceID,
-		CompletedAt: time.Now().UTC().Format(time.RFC3339),
-		Version:     version,
+		Kind:          "result",
+		RequestID:     command.RequestID,
+		DeviceID:      deviceID,
+		CompletedAt:   time.Now().UTC().Format(time.RFC3339),
+		Version:       version,
+		ResultPayload: map[string]any{"command_type": strings.ToUpper(strings.TrimSpace(command.Type))},
 	}
 
 	defer func() {
@@ -293,6 +294,14 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.OK = true
 		result.Message = "Restart scheduled (5s)"
 		return result
+	case "AGENT_REMOVE":
+		if err := removeAgentSilently(); err != nil {
+			return handleErr(err, "REMOVE_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Agent removal scheduled"
+		return result
 	case "ADMIN_EXEC_CMD":
 		commandText, err := readStringArg(command.Args, "command")
 		if err != nil {
@@ -306,6 +315,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "ADMIN_EXEC_POWERSHELL":
 		script, err := readStringArg(command.Args, "script")
@@ -320,6 +330,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "PROCESS_LIST":
 		filter, err := readOptionalStringArg(command.Args, "filter", "")
@@ -334,6 +345,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "PROCESS_KILL":
 		target, err := readStringArg(command.Args, "target")
@@ -353,6 +365,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "PROCESS_START":
 		commandText, err := readStringArg(command.Args, "command")
@@ -367,6 +380,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "PROCESS_DETAILS":
 		target, err := readStringArg(command.Args, "target")
@@ -381,6 +395,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "SERVICE_LIST":
 		filter, err := readOptionalStringArg(command.Args, "filter", "")
@@ -395,6 +410,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "SERVICE_CONTROL":
 		action, err := readStringArg(command.Args, "action")
@@ -414,6 +430,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "SERVICE_DETAILS":
 		name, err := readStringArg(command.Args, "name")
@@ -428,6 +445,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_READ":
 		path, err := readStringArg(command.Args, "path")
@@ -447,6 +465,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_WRITE":
 		path, err := readStringArg(command.Args, "path")
@@ -466,6 +485,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_APPEND":
 		path, err := readStringArg(command.Args, "path")
@@ -485,6 +505,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_COPY":
 		source, err := readStringArg(command.Args, "source")
@@ -504,6 +525,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_MOVE":
 		source, err := readStringArg(command.Args, "source")
@@ -523,6 +545,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_EXISTS":
 		path, err := readStringArg(command.Args, "path")
@@ -537,6 +560,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_HASH":
 		path, err := readStringArg(command.Args, "path")
@@ -556,6 +580,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_TAIL":
 		path, err := readStringArg(command.Args, "path")
@@ -575,6 +600,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_DELETE":
 		path, err := readStringArg(command.Args, "path")
@@ -589,6 +615,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_LIST":
 		path, err := readStringArg(command.Args, "path")
@@ -603,6 +630,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "FILE_MKDIR":
 		path, err := readStringArg(command.Args, "path")
@@ -617,6 +645,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "NETWORK_INFO":
 		output, err := collectNetworkInfo()
@@ -626,6 +655,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "NETWORK_TEST":
 		host, err := readStringArg(command.Args, "host")
@@ -645,6 +675,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "NETWORK_FLUSH_DNS":
 		output, err := flushDNSCache()
@@ -654,6 +685,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "EVENT_LOG_QUERY":
 		logName, err := readStringArg(command.Args, "log")
@@ -673,6 +705,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "ENV_LIST":
 		prefix, err := readOptionalStringArg(command.Args, "prefix", "")
@@ -687,6 +720,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "ENV_GET":
 		key, err := readStringArg(command.Args, "key")
@@ -701,6 +735,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	case "SYSTEM_INFO":
 		output, err := collectSystemInfo()
@@ -710,6 +745,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = output
+		result.ResultPayload["output"] = output
 		return result
 	default:
 		return handleErr(fmt.Errorf("unknown command type: %s", command.Type), "UNKNOWN_TYPE")
@@ -981,6 +1017,153 @@ func signOut() error {
 	}
 
 	return nil
+}
+
+func removeAgentSilently() error {
+	if runtime.GOOS != "windows" {
+		return errors.New("AGENT_REMOVE is supported only on Windows")
+	}
+
+	executablePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	cleanupScriptPath, err := writeAgentRemovalScript(executablePath, removalConfigPaths())
+	if err != nil {
+		return fmt.Errorf("prepare removal script: %w", err)
+	}
+
+	cmd := exec.Command(
+		"powershell",
+		"-NoProfile",
+		"-NonInteractive",
+		"-WindowStyle",
+		"Hidden",
+		"-ExecutionPolicy",
+		"Bypass",
+		"-File",
+		cleanupScriptPath,
+	)
+
+	configureHiddenProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		_ = os.Remove(cleanupScriptPath)
+		return fmt.Errorf("launch removal script: %w", err)
+	}
+
+	return nil
+}
+
+func writeAgentRemovalScript(executablePath string, configPaths []string) (string, error) {
+	tempDir := os.TempDir()
+	scriptPath := filepath.Join(tempDir, fmt.Sprintf("a1-agent-remove-%d.ps1", time.Now().UnixNano()))
+	scriptSelf := psSingleQuoted(scriptPath)
+	exe := psSingleQuoted(executablePath)
+
+	quotedConfigPaths := make([]string, 0, len(configPaths))
+	for _, path := range configPaths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+
+		quotedConfigPaths = append(quotedConfigPaths, psSingleQuoted(path))
+	}
+
+	configPathLiteral := "@()"
+	if len(quotedConfigPaths) > 0 {
+		configPathLiteral = "@(" + strings.Join(quotedConfigPaths, ", ") + ")"
+	}
+
+	script := fmt.Sprintf(`$ErrorActionPreference = "SilentlyContinue"
+$executablePath = %s
+$configPaths = %s
+$scriptPath = %s
+$runKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$taskNames = @("A1Agent", "CordycepsAgent", "JarvisAgent")
+$runKeyNames = @("A1Agent", "CordycepsAgent", "JarvisAgent")
+
+Start-Sleep -Seconds 6
+
+foreach ($taskName in $taskNames) {
+  schtasks /Delete /TN $taskName /F 2>$null | Out-Null
+}
+
+foreach ($runKeyName in $runKeyNames) {
+  Remove-ItemProperty -Path $runKeyPath -Name $runKeyName -ErrorAction SilentlyContinue
+}
+
+Get-Process | Where-Object { $_.Path -eq $executablePath } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
+if (Test-Path -LiteralPath $executablePath) {
+  Remove-Item -LiteralPath $executablePath -Force -ErrorAction SilentlyContinue
+}
+
+foreach ($configPath in $configPaths) {
+  if (-not $configPath) {
+    continue
+  }
+
+  if (Test-Path -LiteralPath $configPath) {
+    Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+  }
+
+  $configDir = Split-Path -Parent $configPath
+  if ($configDir -and (Test-Path -LiteralPath $configDir)) {
+    $remaining = @(Get-ChildItem -LiteralPath $configDir -Force -ErrorAction SilentlyContinue)
+    if ($remaining.Count -eq 0) {
+      Remove-Item -LiteralPath $configDir -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+$installRoot = Split-Path -Parent $executablePath
+if ($installRoot -and (Test-Path -LiteralPath $installRoot)) {
+  $remaining = @(Get-ChildItem -LiteralPath $installRoot -Force -ErrorAction SilentlyContinue)
+  if ($remaining.Count -eq 0) {
+    Remove-Item -LiteralPath $installRoot -Force -ErrorAction SilentlyContinue
+  }
+}
+
+Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+`, exe, configPathLiteral, scriptSelf)
+
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		return "", err
+	}
+
+	return scriptPath, nil
+}
+
+func removalConfigPaths() []string {
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, 2)
+
+	add := func(path string) {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			return
+		}
+
+		normalized := filepath.Clean(trimmed)
+		if _, exists := seen[normalized]; exists {
+			return
+		}
+
+		seen[normalized] = struct{}{}
+		paths = append(paths, normalized)
+	}
+
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		add(filepath.Join(appData, "A1Agent", "config.json"))
+	}
+
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(homeDir, ".a1-agent", "config.json"))
+	}
+
+	return paths
 }
 
 func executeAdminCmd(commandText string) (string, error) {

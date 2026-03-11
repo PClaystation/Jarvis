@@ -26,6 +26,7 @@ export interface CommandLogInsert {
   argsJson: string;
   status: string;
   resultMessage: string | null;
+  resultJson?: string | null;
   errorCode?: string | null;
 }
 
@@ -40,6 +41,7 @@ export interface CommandLogRecord {
   args: Record<string, unknown>;
   status: string;
   result_message: string | null;
+  result_payload: Record<string, unknown> | null;
   error_code: string | null;
   created_at: string;
   completed_at: string | null;
@@ -101,6 +103,14 @@ export interface DeviceGroupRecord {
   display_name: string;
   description: string | null;
   device_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeviceAppAliasRecord {
+  device_id: string;
+  alias: string;
+  app: string;
   created_at: string;
   updated_at: string;
 }
@@ -195,6 +205,7 @@ export class Database {
         args_json TEXT NOT NULL,
         status TEXT NOT NULL,
         result_message TEXT,
+        result_json TEXT,
         error_code TEXT,
         created_at TEXT NOT NULL,
         completed_at TEXT,
@@ -245,6 +256,16 @@ export class Database {
         FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS device_app_aliases (
+        device_id TEXT NOT NULL,
+        alias TEXT NOT NULL,
+        app TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (device_id, alias),
+        FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+      );
+
       CREATE INDEX IF NOT EXISTS idx_command_logs_request_id ON command_logs(request_id);
       CREATE INDEX IF NOT EXISTS idx_command_logs_device_id ON command_logs(device_id);
       CREATE INDEX IF NOT EXISTS idx_command_logs_created_at ON command_logs(created_at DESC);
@@ -253,7 +274,20 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_api_keys_status ON api_keys(status);
       CREATE INDEX IF NOT EXISTS idx_device_group_members_group_id ON device_group_members(group_id);
       CREATE INDEX IF NOT EXISTS idx_device_group_members_device_id ON device_group_members(device_id);
+      CREATE INDEX IF NOT EXISTS idx_device_app_aliases_device_id ON device_app_aliases(device_id);
     `);
+
+    this.ensureColumn("command_logs", "result_json", "TEXT");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+    const exists = rows.some((row) => row.name === column);
+    if (exists) {
+      return;
+    }
+
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   private runEnrollStatement(
@@ -673,6 +707,7 @@ export class Database {
           args_json,
           status,
           result_message,
+          result_json,
           error_code,
           created_at,
           completed_at
@@ -687,6 +722,7 @@ export class Database {
           @args_json,
           @status,
           @result_message,
+          @result_json,
           @error_code,
           @created_at,
           @completed_at
@@ -703,6 +739,7 @@ export class Database {
         args_json: input.argsJson,
         status: input.status,
         result_message: input.resultMessage,
+        result_json: input.resultJson ?? null,
         error_code: input.errorCode ?? null,
         created_at: now,
         completed_at: null,
@@ -713,18 +750,20 @@ export class Database {
     id: string;
     status: string;
     resultMessage: string;
+    resultPayload?: Record<string, unknown> | null;
     errorCode?: string;
   }): void {
     const completedAt = new Date().toISOString();
 
     this.db
       .prepare(
-        "UPDATE command_logs SET status = @status, result_message = @result_message, error_code = @error_code, completed_at = @completed_at WHERE id = @id",
+        "UPDATE command_logs SET status = @status, result_message = @result_message, result_json = @result_json, error_code = @error_code, completed_at = @completed_at WHERE id = @id",
       )
       .run({
         id: input.id,
         status: input.status,
         result_message: input.resultMessage,
+        result_json: input.resultPayload ? JSON.stringify(input.resultPayload) : null,
         error_code: input.errorCode ?? null,
         completed_at: completedAt,
       });
@@ -891,6 +930,7 @@ export class Database {
         args_json,
         status,
         result_message,
+        result_json,
         error_code,
         created_at,
         completed_at
@@ -911,6 +951,7 @@ export class Database {
       args_json: string;
       status: string;
       result_message: string | null;
+      result_json: string | null;
       error_code: string | null;
       created_at: string;
       completed_at: string | null;
@@ -927,6 +968,7 @@ export class Database {
       args: parseJsonObject(row.args_json),
       status: row.status,
       result_message: row.result_message,
+      result_payload: row.result_json ? parseJsonObject(row.result_json) : null,
       error_code: row.error_code,
       created_at: row.created_at,
       completed_at: row.completed_at,
@@ -1238,6 +1280,76 @@ export class Database {
   public deleteDeviceGroup(groupId: string): boolean {
     const result = this.db.prepare("DELETE FROM device_groups WHERE group_id = ?").run(groupId);
     return result.changes > 0;
+  }
+
+  public listDeviceAppAliases(deviceId: string): DeviceAppAliasRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT device_id, alias, app, created_at, updated_at FROM device_app_aliases WHERE device_id = ? ORDER BY alias COLLATE NOCASE ASC",
+      )
+      .all(deviceId) as Array<{
+      device_id: string;
+      alias: string;
+      app: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      device_id: row.device_id,
+      alias: row.alias,
+      app: row.app,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
+  }
+
+  public resolveDeviceAppAlias(deviceId: string, alias: string): string | null {
+    const row = this.db
+      .prepare("SELECT app FROM device_app_aliases WHERE device_id = @device_id AND alias = @alias")
+      .get({
+        device_id: deviceId,
+        alias,
+      }) as
+      | {
+          app: string;
+        }
+      | undefined;
+
+    return row?.app ?? null;
+  }
+
+  public replaceDeviceAppAliases(deviceId: string, aliases: Array<{ alias: string; app: string }>): DeviceAppAliasRecord[] {
+    const now = new Date().toISOString();
+    const normalized = aliases
+      .map((entry) => ({
+        alias: entry.alias.trim().toLowerCase().replace(/\s+/g, " "),
+        app: entry.app.trim().toLowerCase(),
+      }))
+      .filter((entry) => entry.alias.length > 0 && entry.app.length > 0);
+
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM device_app_aliases WHERE device_id = ?").run(deviceId);
+      const insert = this.db.prepare(
+        `
+          INSERT INTO device_app_aliases (device_id, alias, app, created_at, updated_at)
+          VALUES (@device_id, @alias, @app, @created_at, @updated_at)
+        `,
+      );
+
+      for (const entry of normalized) {
+        insert.run({
+          device_id: deviceId,
+          alias: entry.alias,
+          app: entry.app,
+          created_at: now,
+          updated_at: now,
+        });
+      }
+    });
+
+    tx();
+    return this.listDeviceAppAliases(deviceId);
   }
 
   public healthSnapshot(): {

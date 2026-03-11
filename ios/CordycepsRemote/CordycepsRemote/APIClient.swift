@@ -170,6 +170,8 @@ enum CordycepsClient {
       request_id: requestID,
       text: text,
       source: "ios-native",
+      is_async: true,
+      timeout_ms: nil,
       sent_at: isoFormatter.string(from: Date()),
       client_version: "cordyceps-remote-ios-v3"
     )

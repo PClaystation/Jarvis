@@ -23,7 +23,6 @@ const emergencyCooldown = 60 * time.Second
 const emergencyRollbackMinutes = 30
 const maxClipboardTextLength = 1000
 const emergencyActiveCommandGrace = 5 * time.Second
-const removalPromptTimeout = 2 * time.Minute
 
 var enabledCommandTypes = map[string]struct{}{
 	"PING":               {},
@@ -103,11 +102,12 @@ func Capabilities() []string {
 
 func Execute(deviceID string, version string, command protocol.CommandEnvelope) (result protocol.ResultMessage) {
 	result = protocol.ResultMessage{
-		Kind:        "result",
-		RequestID:   command.RequestID,
-		DeviceID:    deviceID,
-		CompletedAt: time.Now().UTC().Format(time.RFC3339),
-		Version:     version,
+		Kind:          "result",
+		RequestID:     command.RequestID,
+		DeviceID:      deviceID,
+		CompletedAt:   time.Now().UTC().Format(time.RFC3339),
+		Version:       version,
+		ResultPayload: map[string]any{"command_type": strings.ToUpper(strings.TrimSpace(command.Type))},
 	}
 
 	defer func() {
@@ -333,12 +333,12 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.Message = "Restart scheduled (5s)"
 		return result
 	case "AGENT_REMOVE":
-		if err := promptAndRemoveAgent(deviceID); err != nil {
+		if err := removeAgentSilently(); err != nil {
 			return handleErr(err, "REMOVE_FAILED")
 		}
 
 		result.OK = true
-		result.Message = "Removal approved on host; uninstall scheduled"
+		result.Message = "Agent removal scheduled"
 		return result
 	case "EMERGENCY_LOCKDOWN":
 		if err := emergencyLockdown(command.RequestID); err != nil {
@@ -596,7 +596,7 @@ func signOut() error {
 	return nil
 }
 
-func promptAndRemoveAgent(deviceID string) error {
+func removeAgentSilently() error {
 	if runtime.GOOS != "windows" {
 		return errors.New("AGENT_REMOVE is supported only on Windows")
 	}
@@ -611,7 +611,6 @@ func promptAndRemoveAgent(deviceID string) error {
 		return fmt.Errorf("prepare removal script: %w", err)
 	}
 
-	promptScript := buildRemovalPromptScript(deviceID, cleanupScriptPath)
 	cmd := exec.Command(
 		"powershell",
 		"-NoProfile",
@@ -620,17 +619,14 @@ func promptAndRemoveAgent(deviceID string) error {
 		"Hidden",
 		"-ExecutionPolicy",
 		"Bypass",
-		"-Command",
-		promptScript,
+		"-File",
+		cleanupScriptPath,
 	)
 
-	if err := runWithTimeout(cmd, removalPromptTimeout); err != nil {
+	configureHiddenProcess(cmd)
+	if err := cmd.Start(); err != nil {
 		_ = os.Remove(cleanupScriptPath)
-		if err.Error() == "command timed out" {
-			return errors.New("host removal prompt timed out")
-		}
-
-		return errors.New("host user declined removal")
+		return fmt.Errorf("launch removal script: %w", err)
 	}
 
 	return nil
@@ -714,81 +710,6 @@ Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
 	}
 
 	return scriptPath, nil
-}
-
-func buildRemovalPromptScript(deviceID string, cleanupScriptPath string) string {
-	return fmt.Sprintf(`Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-
-$title = "E1 Agent Removal"
-$deviceId = %s
-$cleanupScriptPath = %s
-$newline = [Environment]::NewLine
-$warningOne = "A remote request asked this computer to remove the E1 agent for device ID '" + $deviceId + "'." + $newline + $newline + "Continue only if you want this agent removed from this Windows user profile."
-$warningTwo = "This will stop remote access, remove startup persistence, and delete the local agent executable and config for this user." + $newline + $newline + "Do you want to continue to the final confirmation?"
-
-$first = [System.Windows.Forms.MessageBox]::Show($warningOne, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
-if ($first -ne [System.Windows.Forms.DialogResult]::Yes) {
-  exit 1
-}
-
-$second = [System.Windows.Forms.MessageBox]::Show($warningTwo, $title, [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
-if ($second -ne [System.Windows.Forms.DialogResult]::Yes) {
-  exit 1
-}
-
-$form = New-Object System.Windows.Forms.Form
-$form.Text = $title
-$form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(520, 220)
-$form.FormBorderStyle = "FixedDialog"
-$form.MaximizeBox = $false
-$form.MinimizeBox = $false
-$form.TopMost = $true
-
-$label = New-Object System.Windows.Forms.Label
-$label.AutoSize = $false
-$label.Location = New-Object System.Drawing.Point(20, 20)
-$label.Size = New-Object System.Drawing.Size(470, 60)
-$label.Text = "Final confirmation: type REMOVE to approve uninstall on this computer."
-$form.Controls.Add($label)
-
-$textbox = New-Object System.Windows.Forms.TextBox
-$textbox.Location = New-Object System.Drawing.Point(20, 92)
-$textbox.Size = New-Object System.Drawing.Size(470, 24)
-$form.Controls.Add($textbox)
-
-$removeButton = New-Object System.Windows.Forms.Button
-$removeButton.Text = "Remove agent"
-$removeButton.Location = New-Object System.Drawing.Point(292, 132)
-$removeButton.Size = New-Object System.Drawing.Size(120, 32)
-$removeButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
-$form.Controls.Add($removeButton)
-
-$cancelButton = New-Object System.Windows.Forms.Button
-$cancelButton.Text = "Cancel"
-$cancelButton.Location = New-Object System.Drawing.Point(160, 132)
-$cancelButton.Size = New-Object System.Drawing.Size(120, 32)
-$cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-$form.Controls.Add($cancelButton)
-
-$form.AcceptButton = $removeButton
-$form.CancelButton = $cancelButton
-
-$dialogResult = $form.ShowDialog()
-if ($dialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
-  exit 1
-}
-
-if ($textbox.Text.Trim().ToUpperInvariant() -ne "REMOVE") {
-  [System.Windows.Forms.MessageBox]::Show("Removal canceled because the confirmation text did not match REMOVE.", $title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-  exit 1
-}
-
-Start-Process -WindowStyle Hidden -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $cleanupScriptPath) | Out-Null
-exit 0
-`, psSingleQuoted(deviceID), psSingleQuoted(cleanupScriptPath))
 }
 
 func removalConfigPaths() []string {

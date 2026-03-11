@@ -30,6 +30,8 @@ interface CommandRequestBody {
   request_id?: string;
   text?: string;
   source?: string;
+  async?: unknown;
+  timeout_ms?: unknown;
   sent_at?: string;
   client_version?: string;
   user_id?: string;
@@ -60,6 +62,13 @@ interface UpdateRequestBody {
 
 interface RenameDeviceBody {
   display_name?: string;
+}
+
+interface DeviceAppAliasesBody {
+  aliases?: Array<{
+    alias?: string;
+    app?: string;
+  }>;
 }
 
 interface CreateApiKeyBody {
@@ -226,6 +235,29 @@ const STANDARD_PROFILE_EXTRA_COMMANDS = new Set([
   "SYSTEM_SHUTDOWN",
   "SYSTEM_RESTART",
   "AGENT_REMOVE",
+]);
+
+const OPEN_APP_CANONICAL_ALLOWLIST = new Set([
+  "spotify",
+  "discord",
+  "chrome",
+  "steam",
+  "explorer",
+  "vscode",
+  "edge",
+  "firefox",
+  "notepad",
+  "calculator",
+  "settings",
+  "slack",
+  "teams",
+  "taskmanager",
+  "terminal",
+  "powershell",
+  "cmd",
+  "controlpanel",
+  "paint",
+  "snippingtool",
 ]);
 
 function makeLogId(requestId: string, deviceId: string): string {
@@ -587,6 +619,25 @@ function requiredCapabilityForCommand(type: string): string | null {
   return null;
 }
 
+function timeoutForCommand(config: AppConfig, type: string): number {
+  if (ADMIN_ONLY_COMMANDS.has(type)) {
+    return config.adminCommandTimeoutMs;
+  }
+
+  if (
+    type === "SYSTEM_SLEEP" ||
+    type === "SYSTEM_SIGN_OUT" ||
+    type === "SYSTEM_SHUTDOWN" ||
+    type === "SYSTEM_RESTART" ||
+    type === "AGENT_REMOVE" ||
+    type === "EMERGENCY_LOCKDOWN"
+  ) {
+    return config.powerCommandTimeoutMs;
+  }
+
+  return config.commandTimeoutMs;
+}
+
 function profileFromDeviceId(deviceId: string): AgentProfile {
   const normalized = asTrimmedString(deviceId).toLowerCase();
   if (normalized.startsWith("se")) {
@@ -763,6 +814,14 @@ function asRenameDeviceBody(body: unknown): RenameDeviceBody {
   return body as RenameDeviceBody;
 }
 
+function asDeviceAppAliasesBody(body: unknown): DeviceAppAliasesBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as DeviceAppAliasesBody;
+}
+
 function normalizeUpdateTarget(candidate: unknown): string {
   return asTrimmedString(candidate).toLowerCase();
 }
@@ -832,6 +891,22 @@ function normalizeOptionalSizeBytes(value: unknown, maxBytes: number): number | 
   }
 
   return parsed;
+}
+
+function normalizeOptionalTimeoutMs(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+    return null;
+  }
+
+  const bounded = Math.floor(parsed);
+  const min = 1_000;
+  const max = 15 * 60 * 1_000;
+  return Math.max(min, Math.min(max, bounded));
 }
 
 function normalizeBoolean(value: unknown): boolean {
@@ -909,6 +984,41 @@ function parseActionTextAsCommand(text: string): TypedCommand | null {
   return parsed.command;
 }
 
+function rewriteOpenAliasCommand(rawText: string, db: Database): string {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return rawText;
+  }
+
+  const firstSpace = trimmed.search(/\s/);
+  if (firstSpace < 0) {
+    return rawText;
+  }
+
+  const target = trimmed.slice(0, firstSpace).trim().toLowerCase();
+  if (!target || target === "all" || !/^[a-z][a-z0-9_-]{1,31}$/.test(target)) {
+    return rawText;
+  }
+
+  const commandPhrase = trimmed.slice(firstSpace + 1).trim();
+  const openMatch = commandPhrase.match(/^(open|launch|start)\s+(.+)$/i);
+  if (!openMatch) {
+    return rawText;
+  }
+
+  const alias = openMatch[2]?.trim().toLowerCase().replace(/\s+/g, " ") ?? "";
+  if (!alias) {
+    return rawText;
+  }
+
+  const mapped = db.resolveDeviceAppAlias(target, alias);
+  if (!mapped || !OPEN_APP_CANONICAL_ALLOWLIST.has(mapped)) {
+    return rawText;
+  }
+
+  return `${target} open ${mapped}`;
+}
+
 function publishCommandLogEvent(
   deps: ApiDeps,
   input: {
@@ -920,6 +1030,7 @@ function publishCommandLogEvent(
     parsedType: string;
     status: string;
     message: string | null;
+    resultPayload?: Record<string, unknown> | null;
     errorCode?: string | null;
   },
 ): void {
@@ -932,6 +1043,7 @@ function publishCommandLogEvent(
     parsed_type: input.parsedType,
     status: input.status,
     message: input.message,
+    result_payload: input.resultPayload ?? null,
     error_code: input.errorCode ?? null,
     ts: new Date().toISOString(),
   });
@@ -1261,6 +1373,107 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     });
   });
 
+  server.get("/api/devices/:deviceId/app-aliases", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["devices:read"])) {
+      return;
+    }
+
+    const params = request.params as { deviceId?: string } | undefined;
+    const deviceId = asTrimmedString(params?.deviceId).toLowerCase();
+    if (!deviceId || !/^[a-z0-9_-]{2,32}$/.test(deviceId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "device_id must be 2-32 chars and use a-z, 0-9, _ or -",
+      });
+      return;
+    }
+
+    const known = deps.db.getDevice(deviceId) ?? deps.registry.get(deviceId);
+    if (!known) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown device: ${deviceId}`,
+        error_code: "UNKNOWN_DEVICE",
+      });
+      return;
+    }
+
+    reply.send({
+      ok: true,
+      device_id: deviceId,
+      aliases: deps.db.listDeviceAppAliases(deviceId),
+    });
+  });
+
+  server.put("/api/devices/:deviceId/app-aliases", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["devices:write"])) {
+      return;
+    }
+
+    const params = request.params as { deviceId?: string } | undefined;
+    const deviceId = asTrimmedString(params?.deviceId).toLowerCase();
+    if (!deviceId || !/^[a-z0-9_-]{2,32}$/.test(deviceId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "device_id must be 2-32 chars and use a-z, 0-9, _ or -",
+      });
+      return;
+    }
+
+    const known = deps.db.getDevice(deviceId) ?? deps.registry.get(deviceId);
+    if (!known) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown device: ${deviceId}`,
+        error_code: "UNKNOWN_DEVICE",
+      });
+      return;
+    }
+
+    const body = asDeviceAppAliasesBody(request.body);
+    const aliasesRaw = Array.isArray(body.aliases) ? body.aliases : [];
+    const aliases: Array<{ alias: string; app: string }> = [];
+
+    for (const entry of aliasesRaw) {
+      const alias = asTrimmedString(entry?.alias).toLowerCase().replace(/\s+/g, " ");
+      const app = asTrimmedString(entry?.app).toLowerCase();
+      if (!alias || !app) {
+        continue;
+      }
+
+      if (alias.length > 80 || !/^[a-z0-9 _-]+$/.test(alias)) {
+        reply.code(400).send({
+          ok: false,
+          message: `Invalid alias: ${alias}`,
+          error_code: "INVALID_ALIAS",
+        });
+        return;
+      }
+
+      if (!OPEN_APP_CANONICAL_ALLOWLIST.has(app)) {
+        reply.code(400).send({
+          ok: false,
+          message: `Invalid app target for alias ${alias}: ${app}`,
+          error_code: "INVALID_ALIAS_APP",
+        });
+        return;
+      }
+
+      aliases.push({ alias, app });
+      if (aliases.length >= 200) {
+        break;
+      }
+    }
+
+    const saved = deps.db.replaceDeviceAppAliases(deviceId, aliases);
+    reply.send({
+      ok: true,
+      device_id: deviceId,
+      aliases: saved,
+      message: `Saved ${saved.length} app aliases`,
+    });
+  });
+
   server.get("/api/command-logs", async (request, reply) => {
     if (!authorize(request, reply, deps, ["history:read"])) {
       return;
@@ -1289,6 +1502,52 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       ok: true,
       count: logs.length,
       next_before: nextBefore,
+      logs,
+    });
+  });
+
+  server.get("/api/command-jobs/:requestId", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["history:read"])) {
+      return;
+    }
+
+    const params = request.params as { requestId?: string } | undefined;
+    const requestId = asTrimmedString(params?.requestId);
+    if (!requestId) {
+      reply.code(400).send({
+        ok: false,
+        message: "request_id is required",
+        error_code: "INVALID_REQUEST_ID",
+      });
+      return;
+    }
+
+    const logs = deps.db.listCommandLogs({
+      limit: MAX_HISTORY_LIMIT,
+      requestId,
+    });
+
+    if (logs.length === 0) {
+      reply.code(404).send({
+        ok: false,
+        request_id: requestId,
+        message: `Unknown request_id: ${requestId}`,
+        error_code: "UNKNOWN_REQUEST_ID",
+      });
+      return;
+    }
+
+    const done = logs.every((entry) => entry.status !== "queued");
+    const okCount = logs.filter((entry) => entry.status === "ok").length;
+    const failedCount = logs.filter((entry) => entry.status === "failed" || entry.status === "timeout").length;
+
+    reply.send({
+      ok: failedCount === 0 && done,
+      request_id: requestId,
+      done,
+      ok_count: okCount,
+      failed_count: failedCount,
+      total: logs.length,
       logs,
     });
   });
@@ -1477,45 +1736,117 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
-    const targetDeviceIds = group.device_ids.filter((deviceId) => deps.registry.get(deviceId));
+    const targetDeviceIds = [...group.device_ids];
     if (targetDeviceIds.length === 0) {
       reply.code(409).send({
         ok: false,
         request_id: requestId,
-        message: "No online devices in group",
+        message: "No devices in group",
+        results: [],
         error_code: "NO_ONLINE_DEVICES",
       });
       return;
     }
 
     const requiredCapability = requiredCapabilityForCommand(parsedCommand.type);
+    const dispatchableDeviceIds: string[] = [];
+    const preflightResults: CommandDispatchResult[] = [];
+
     for (const deviceId of targetDeviceIds) {
       const connected = deps.registry.get(deviceId);
       if (!connected) {
+        preflightResults.push({
+          request_id: requestId,
+          device_id: deviceId,
+          ok: false,
+          message: `${deviceId} is offline`,
+          error_code: "DEVICE_OFFLINE",
+          completed_at: new Date().toISOString(),
+        });
         continue;
       }
 
       const profile = resolveDeviceProfile(deviceId, connected.capabilities);
       if (!isCommandAllowedForProfile(profile, parsedCommand.type)) {
-        reply.code(409).send({
-          ok: false,
+        preflightResults.push({
           request_id: requestId,
+          device_id: deviceId,
+          ok: false,
           message: `${deviceId} (${profileLabel(profile)} profile) blocks ${parsedCommand.type.toLowerCase()}`,
           error_code: "COMMAND_NOT_ALLOWED_FOR_PROFILE",
+          completed_at: new Date().toISOString(),
         });
-        return;
+        continue;
       }
 
       if (requiredCapability && !connected.capabilities.includes(requiredCapability)) {
-        reply.code(409).send({
-          ok: false,
+        preflightResults.push({
           request_id: requestId,
+          device_id: deviceId,
+          ok: false,
           message: `${deviceId} does not support ${parsedCommand.type.toLowerCase()} yet`,
           error_code: "COMMAND_NOT_SUPPORTED",
+          completed_at: new Date().toISOString(),
         });
-        return;
+        continue;
       }
 
+      dispatchableDeviceIds.push(deviceId);
+    }
+
+    for (const skipped of preflightResults) {
+      deps.db.insertCommandLog({
+        id: makeLogId(requestId, skipped.device_id),
+        requestId,
+        deviceId: skipped.device_id,
+        source,
+        rawText,
+        parsedTarget: `group:${groupId}`,
+        parsedType: parsedCommand.type,
+        argsJson: JSON.stringify(parsedCommand.args),
+        status: "failed",
+        resultMessage: skipped.message,
+        errorCode: skipped.error_code ?? "ROUTING_ERROR",
+      });
+      deps.db.completeCommandLog({
+        id: makeLogId(requestId, skipped.device_id),
+        status: "failed",
+        resultMessage: skipped.message,
+        resultPayload: skipped.result_payload,
+        errorCode: skipped.error_code,
+      });
+      publishCommandLogEvent(deps, {
+        requestId,
+        deviceId: skipped.device_id,
+        source,
+        rawText,
+        parsedTarget: `group:${groupId}`,
+        parsedType: parsedCommand.type,
+        status: "failed",
+        message: skipped.message,
+        resultPayload: skipped.result_payload,
+        errorCode: skipped.error_code,
+      });
+    }
+
+    if (dispatchableDeviceIds.length === 0) {
+      reply.code(409).send({
+        ok: false,
+        request_id: requestId,
+        message: "No eligible online devices in group",
+        results: preflightResults.map((result) => ({
+          device_id: result.device_id,
+          ok: result.ok,
+          message: result.message,
+          result_payload: result.result_payload ?? null,
+          error_code: result.error_code,
+        })),
+        error_code: "NO_ONLINE_DEVICES",
+      });
+      return;
+    }
+
+    for (const deviceId of dispatchableDeviceIds) {
       deps.db.insertCommandLog({
         id: makeLogId(requestId, deviceId),
         requestId,
@@ -1542,17 +1873,20 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       });
     }
 
-    const results = await deps.router.dispatchToMany({
+    const commandTimeoutMs = timeoutForCommand(deps.config, parsedCommand.type);
+    const dispatchResults = await deps.router.dispatchToMany({
       requestId,
-      deviceIds: targetDeviceIds,
+      deviceIds: dispatchableDeviceIds,
       command: parsedCommand,
+      timeoutMs: commandTimeoutMs,
     });
 
-    for (const result of results) {
+    for (const result of dispatchResults) {
       deps.db.completeCommandLog({
         id: makeLogId(requestId, result.device_id),
         status: result.ok ? "ok" : "failed",
         resultMessage: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
 
@@ -1565,21 +1899,26 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         parsedType: parsedCommand.type,
         status: result.ok ? "ok" : "failed",
         message: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
     }
 
-    const okCount = results.filter((result) => result.ok).length;
+    const results = [...dispatchResults, ...preflightResults];
+    const okCount = dispatchResults.filter((result) => result.ok).length;
+    const dispatchCount = dispatchResults.length;
+    const skippedCount = preflightResults.length;
     reply.send({
-      ok: okCount === results.length,
+      ok: okCount === dispatchCount && skippedCount === 0,
       request_id: requestId,
       target: `group:${groupId}`,
       parsed_type: parsedCommand.type,
-      message: `Completed ${okCount}/${results.length}`,
+      message: `Completed ${okCount}/${dispatchCount}${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}`,
       results: results.map((result: CommandDispatchResult) => ({
         device_id: result.device_id,
         ok: result.ok,
         message: result.message,
+        result_payload: result.result_payload ?? null,
         error_code: result.error_code,
       })),
     });
@@ -1964,6 +2303,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           id: makeLogId(requestId, deviceId),
           status: result.ok ? "ok" : "failed",
           resultMessage: result.message,
+          resultPayload: result.result_payload,
           errorCode: result.error_code,
         });
 
@@ -1976,6 +2316,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           parsedType: "AGENT_UPDATE",
           status: result.ok ? "ok" : "failed",
           message: result.message,
+          resultPayload: result.result_payload,
           errorCode: result.error_code,
         });
 
@@ -2004,6 +2345,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
                 next_device_id: designationChange.nextDeviceId,
               }
             : null,
+          result_payload: result.result_payload ?? null,
           result,
         });
       } catch (error) {
@@ -2079,6 +2421,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
             ok: false,
             message: dispatch.message,
             error_code: dispatch.code,
+            result_payload: undefined,
             completed_at: new Date().toISOString(),
           };
         }
@@ -2090,6 +2433,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         id: makeLogId(requestId, result.device_id),
         status: result.ok ? "ok" : "failed",
         resultMessage: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
 
@@ -2102,6 +2446,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         parsedType: "AGENT_UPDATE",
         status: result.ok ? "ok" : "failed",
         message: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
 
@@ -2133,6 +2478,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         device_id: result.device_id,
         ok: result.ok,
         message: result.message,
+        result_payload: result.result_payload ?? null,
         error_code: result.error_code,
         designation_change: preparedDesignationChanges.has(result.device_id)
           ? {
@@ -2155,6 +2501,8 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     const text = rawText.trim();
     const requestId = normalizeRequestId(body.request_id);
     const source = normalizeSource(body.source);
+    const asyncDispatch = normalizeBoolean(body.async);
+    const timeoutOverrideMs = normalizeOptionalTimeoutMs(body.timeout_ms);
 
     if (text.length === 0) {
       reply.code(400).send({
@@ -2176,7 +2524,8 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
-    const parsed = parseExternalCommand(text);
+    const rewrittenText = rewriteOpenAliasCommand(text, deps.db);
+    const parsed = parseExternalCommand(rewrittenText);
     if ("code" in parsed) {
       reply.code(400).send({
         ok: false,
@@ -2192,12 +2541,22 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
-    if (parsed.target === "all" && parsed.command.type !== "PING") {
+    if (parsed.target === "all" && !BULK_GROUP_ALLOWED_TYPES.has(parsed.command.type)) {
       reply.code(400).send({
         ok: false,
         request_id: requestId,
-        message: "Command rejected: target all supports only ping in MVP",
+        message: `Command rejected: target all does not allow ${parsed.command.type.toLowerCase()}`,
         error_code: "GROUP_COMMAND_NOT_ALLOWED",
+      });
+      return;
+    }
+
+    if (asyncDispatch && parsed.target === "all") {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "async mode currently supports single-device dispatch only",
+        error_code: "ASYNC_ALL_NOT_SUPPORTED",
       });
       return;
     }
@@ -2216,10 +2575,24 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     }
 
     const requiredCapability = requiredCapabilityForCommand(parsed.command.type);
+    const dispatchableDeviceIds: string[] = [];
+    const preflightResults: CommandDispatchResult[] = [];
 
     for (const deviceId of targetDeviceIds) {
       const knownDevice = deps.db.getDevice(deviceId) ?? deps.registry.get(deviceId);
       if (!knownDevice) {
+        if (parsed.target === "all") {
+          preflightResults.push({
+            request_id: requestId,
+            device_id: deviceId,
+            ok: false,
+            message: `Unknown device: ${deviceId}`,
+            error_code: "UNKNOWN_DEVICE",
+            completed_at: new Date().toISOString(),
+          });
+          continue;
+        }
+
         reply.code(404).send({
           ok: false,
           request_id: requestId,
@@ -2231,6 +2604,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
       const connected = deps.registry.get(deviceId);
       if (!connected) {
+        if (parsed.target === "all") {
+          preflightResults.push({
+            request_id: requestId,
+            device_id: deviceId,
+            ok: false,
+            message: `${deviceId} is offline`,
+            error_code: "DEVICE_OFFLINE",
+            completed_at: new Date().toISOString(),
+          });
+          continue;
+        }
+
         reply.code(409).send({
           ok: false,
           request_id: requestId,
@@ -2242,6 +2627,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
       const profile = resolveDeviceProfile(deviceId, connected.capabilities);
       if (!isCommandAllowedForProfile(profile, parsed.command.type)) {
+        if (parsed.target === "all") {
+          preflightResults.push({
+            request_id: requestId,
+            device_id: deviceId,
+            ok: false,
+            message: `${deviceId} (${profileLabel(profile)} profile) blocks ${parsed.command.type.toLowerCase()}`,
+            error_code: "COMMAND_NOT_ALLOWED_FOR_PROFILE",
+            completed_at: new Date().toISOString(),
+          });
+          continue;
+        }
+
         reply.code(409).send({
           ok: false,
           request_id: requestId,
@@ -2252,6 +2649,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       }
 
       if (requiredCapability && !connected.capabilities.includes(requiredCapability)) {
+        if (parsed.target === "all") {
+          preflightResults.push({
+            request_id: requestId,
+            device_id: deviceId,
+            ok: false,
+            message: `${deviceId} does not support ${parsed.command.type.toLowerCase()} yet`,
+            error_code: "COMMAND_NOT_SUPPORTED",
+            completed_at: new Date().toISOString(),
+          });
+          continue;
+        }
+
         reply.code(409).send({
           ok: false,
           request_id: requestId,
@@ -2261,12 +2670,72 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         return;
       }
 
+      dispatchableDeviceIds.push(deviceId);
+    }
+
+    if (parsed.target === "all") {
+      for (const skipped of preflightResults) {
+        deps.db.insertCommandLog({
+          id: makeLogId(requestId, skipped.device_id),
+          requestId,
+          deviceId: skipped.device_id,
+          source,
+          rawText: text,
+          parsedTarget: parsed.target,
+          parsedType: parsed.command.type,
+          argsJson: JSON.stringify(parsed.command.args),
+          status: "failed",
+          resultMessage: skipped.message,
+          errorCode: skipped.error_code ?? "ROUTING_ERROR",
+        });
+        deps.db.completeCommandLog({
+          id: makeLogId(requestId, skipped.device_id),
+          status: "failed",
+          resultMessage: skipped.message,
+          resultPayload: skipped.result_payload,
+          errorCode: skipped.error_code,
+        });
+        publishCommandLogEvent(deps, {
+          requestId,
+          deviceId: skipped.device_id,
+          source,
+          rawText: text,
+          parsedTarget: parsed.target,
+          parsedType: parsed.command.type,
+          status: "failed",
+          message: skipped.message,
+          resultPayload: skipped.result_payload,
+          errorCode: skipped.error_code,
+        });
+      }
+
+      if (dispatchableDeviceIds.length === 0) {
+        reply.code(409).send({
+          ok: false,
+          request_id: requestId,
+          target: "all",
+          parsed_type: parsed.command.type,
+          message: "No eligible online devices available",
+          results: preflightResults.map((result) => ({
+            device_id: result.device_id,
+            ok: result.ok,
+            message: result.message,
+            result_payload: result.result_payload ?? null,
+            error_code: result.error_code,
+          })),
+          error_code: "NO_ONLINE_DEVICES",
+        });
+        return;
+      }
+    }
+
+    for (const deviceId of dispatchableDeviceIds) {
       deps.db.insertCommandLog({
         id: makeLogId(requestId, deviceId),
         requestId,
         deviceId,
         source,
-        rawText: parsed.rawText,
+        rawText: text,
         parsedTarget: parsed.target,
         parsedType: parsed.command.type,
         argsJson: JSON.stringify(parsed.command.args),
@@ -2279,7 +2748,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         requestId,
         deviceId,
         source,
-        rawText: parsed.rawText,
+        rawText: text,
         parsedTarget: parsed.target,
         parsedType: parsed.command.type,
         status: "queued",
@@ -2288,71 +2757,99 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     }
 
     if (parsed.target !== "all") {
-      const deviceId = targetDeviceIds[0];
-      try {
-        const result = await deps.router.dispatchToDevice({
-          requestId,
-          deviceId,
-          command: parsed.command,
-        });
+      const deviceId = dispatchableDeviceIds[0];
+      const executeSingle = async (): Promise<
+        { kind: "ok"; result: CommandDispatchResult } | { kind: "error"; dispatch: ReturnType<typeof parseDispatchError> }
+      > => {
+        try {
+          const result = await deps.router.dispatchToDevice({
+            requestId,
+            deviceId,
+            command: parsed.command,
+            timeoutMs: timeoutOverrideMs ?? timeoutForCommand(deps.config, parsed.command.type),
+          });
 
-        deps.db.completeCommandLog({
-          id: makeLogId(requestId, deviceId),
-          status: result.ok ? "ok" : "failed",
-          resultMessage: result.message,
-          errorCode: result.error_code,
-        });
+          deps.db.completeCommandLog({
+            id: makeLogId(requestId, deviceId),
+            status: result.ok ? "ok" : "failed",
+            resultMessage: result.message,
+            resultPayload: result.result_payload,
+            errorCode: result.error_code,
+          });
 
-        publishCommandLogEvent(deps, {
-          requestId,
-          deviceId,
-          source,
-          rawText: parsed.rawText,
-          parsedTarget: parsed.target,
-          parsedType: parsed.command.type,
-          status: result.ok ? "ok" : "failed",
-          message: result.message,
-          errorCode: result.error_code,
-        });
+          publishCommandLogEvent(deps, {
+            requestId,
+            deviceId,
+            source,
+            rawText: text,
+            parsedTarget: parsed.target,
+            parsedType: parsed.command.type,
+            status: result.ok ? "ok" : "failed",
+            message: result.message,
+            resultPayload: result.result_payload,
+            errorCode: result.error_code,
+          });
 
-        reply.send({
-          ok: result.ok,
+          return { kind: "ok", result };
+        } catch (error) {
+          const dispatch = parseDispatchError(error);
+
+          deps.db.completeCommandLog({
+            id: makeLogId(requestId, deviceId),
+            status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
+            resultMessage: dispatch.message,
+            errorCode: dispatch.code,
+          });
+
+          publishCommandLogEvent(deps, {
+            requestId,
+            deviceId,
+            source,
+            rawText: text,
+            parsedTarget: parsed.target,
+            parsedType: parsed.command.type,
+            status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
+            message: dispatch.message,
+            errorCode: dispatch.code,
+          });
+
+          return { kind: "error", dispatch };
+        }
+      };
+
+      if (asyncDispatch) {
+        void executeSingle();
+        reply.code(202).send({
+          ok: true,
           request_id: requestId,
+          job_id: requestId,
           target: deviceId,
           parsed_type: parsed.command.type,
-          message: result.message,
-          result,
+          message: "Command accepted and running asynchronously",
+          async: true,
         });
-      } catch (error) {
-        const dispatch = parseDispatchError(error);
-
-        deps.db.completeCommandLog({
-          id: makeLogId(requestId, deviceId),
-          status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
-          resultMessage: dispatch.message,
-          errorCode: dispatch.code,
-        });
-
-        publishCommandLogEvent(deps, {
-          requestId,
-          deviceId,
-          source,
-          rawText: parsed.rawText,
-          parsedTarget: parsed.target,
-          parsedType: parsed.command.type,
-          status: dispatch.code === "TIMEOUT" ? "timeout" : "failed",
-          message: dispatch.message,
-          errorCode: dispatch.code,
-        });
-
-        reply.code(dispatch.httpStatus).send({
-          ok: false,
-          request_id: requestId,
-          target: deviceId,
-          parsed_type: parsed.command.type,
-          message: dispatch.message,
-          error_code: dispatch.code,
-        });
+      } else {
+        const dispatched = await executeSingle();
+        if (dispatched.kind === "ok") {
+          reply.send({
+            ok: dispatched.result.ok,
+            request_id: requestId,
+            target: deviceId,
+            parsed_type: parsed.command.type,
+            message: dispatched.result.message,
+            result_payload: dispatched.result.result_payload ?? null,
+            result: dispatched.result,
+          });
+        } else {
+          reply.code(dispatched.dispatch.httpStatus).send({
+            ok: false,
+            request_id: requestId,
+            target: deviceId,
+            parsed_type: parsed.command.type,
+            message: dispatched.dispatch.message,
+            error_code: dispatched.dispatch.code,
+          });
+        }
       }
 
       return;
@@ -2360,8 +2857,9 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
     const results = await deps.router.dispatchToMany({
       requestId,
-      deviceIds: targetDeviceIds,
+      deviceIds: dispatchableDeviceIds,
       command: parsed.command,
+      timeoutMs: timeoutOverrideMs ?? timeoutForCommand(deps.config, parsed.command.type),
     });
 
     for (const result of results) {
@@ -2369,6 +2867,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         id: makeLogId(requestId, result.device_id),
         status: result.ok ? "ok" : "failed",
         resultMessage: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
 
@@ -2376,28 +2875,31 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         requestId,
         deviceId: result.device_id,
         source,
-        rawText: parsed.rawText,
+        rawText: text,
         parsedTarget: parsed.target,
         parsedType: parsed.command.type,
         status: result.ok ? "ok" : "failed",
         message: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
     }
 
     const okCount = results.filter((result) => result.ok).length;
-    const total = results.length;
+    const total = dispatchableDeviceIds.length;
+    const combinedResults = [...results, ...preflightResults];
 
     reply.send({
-      ok: okCount === total,
+      ok: okCount === total && preflightResults.length === 0,
       request_id: requestId,
       target: "all",
       parsed_type: parsed.command.type,
-      message: `Completed ${okCount}/${total}`,
-      results: results.map((result: CommandDispatchResult) => ({
+      message: `Completed ${okCount}/${total}${preflightResults.length > 0 ? ` (${preflightResults.length} skipped)` : ""}`,
+      results: combinedResults.map((result: CommandDispatchResult) => ({
         device_id: result.device_id,
         ok: result.ok,
         message: result.message,
+        result_payload: result.result_payload ?? null,
         error_code: result.error_code,
       })),
     });

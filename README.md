@@ -11,10 +11,12 @@ Phone-driven mycelium command platform:
 ## Current Colony Capabilities
 
 - `POST /api/command` with deterministic parser and auth
+- Optional async command execution (`POST /api/command` with `async=true`) + job status (`GET /api/command-jobs/:requestId`)
 - `POST /api/update` for one-button remote agent updates
 - `GET /api/health`
 - `POST /api/enroll` for first-run device enrollment
 - `GET /api/devices` (phone-authenticated)
+- Remote-managed per-device app aliases (`GET/PUT /api/devices/:deviceId/app-aliases`)
 - PWA routes: `/app`, `/app.js`, `/app.css`, `/manifest.webmanifest`, `/sw.js`
 - Agent WebSocket auth handshake + heartbeat
 - Presence tracking (`online`/`offline` + `last_seen`)
@@ -123,7 +125,7 @@ Notes:
 - `volume up/down`, `next`, and `previous` support optional numeric repeats (`1-20`)
 - app launch verbs supported: `open`, `launch`, `start`
 - emergency command requires explicit confirmation (`panic confirm`, `lockdown confirm`, or `emergency confirm`)
-- agent removal requires explicit remote confirmation (`remove agent confirm confirm`) and then local host approval on the target PC
+- agent removal requires explicit remote confirmation (`remove agent confirm confirm`); no local host interaction is required on the target PC
 - admin commands must use `admin ...` and are dispatched only to devices that advertise `admin_ops` capability (A1 family)
 - server enforces profile routing policy (`s`, `se`, `t`, `e`, `a`) using capability markers (`profile_s`, `profile_se`, `profile_t`, `profile_e`, `profile_a`) with device-ID prefix fallback
 
@@ -136,6 +138,9 @@ Notes:
    - `PUBLIC_WS_URL` (use `wss://...` behind TLS)
    - `PHONE_API_TOKEN` and `AGENT_BOOTSTRAP_TOKEN` (if omitted, they are auto-generated and persisted)
 4. Optional hardening knobs:
+   - `COMMAND_TIMEOUT_MS`
+   - `ADMIN_COMMAND_TIMEOUT_MS`
+   - `POWER_COMMAND_TIMEOUT_MS`
    - `MAX_PENDING_COMMANDS`
    - `WS_AUTH_TIMEOUT_MS`
    - `WS_PING_INTERVAL_MS`

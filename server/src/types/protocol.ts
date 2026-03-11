@@ -81,6 +81,7 @@ export interface AgentResultMessage {
   ok: boolean;
   message: string;
   error_code?: string;
+  result_payload?: Record<string, unknown>;
   completed_at: string;
   version?: string;
 }
@@ -107,6 +108,7 @@ export interface CommandDispatchResult {
   ok: boolean;
   message: string;
   error_code?: string;
+  result_payload?: Record<string, unknown>;
   completed_at: string;
 }
 

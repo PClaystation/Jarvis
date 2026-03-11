@@ -99,6 +99,7 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		DeviceID:    deviceID,
 		CompletedAt: time.Now().UTC().Format(time.RFC3339),
 		Version:     version,
+		ResultPayload: map[string]any{"command_type": strings.ToUpper(strings.TrimSpace(command.Type))},
 	}
 
 	defer func() {

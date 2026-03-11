@@ -91,6 +91,7 @@ export class CommandRouter {
             ok: false,
             message: routed.message,
             error_code: routed.code,
+            result_payload: undefined,
             completed_at: new Date().toISOString(),
           };
         }),
@@ -114,6 +115,7 @@ export class CommandRouter {
       ok: message.ok,
       message: message.message,
       error_code: message.error_code,
+      result_payload: message.result_payload,
       completed_at: message.completed_at,
     });
 

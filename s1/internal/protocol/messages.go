@@ -26,12 +26,13 @@ type CommandEnvelope struct {
 }
 
 type ResultMessage struct {
-	Kind       string `json:"kind"`
-	RequestID  string `json:"request_id"`
-	DeviceID   string `json:"device_id"`
-	OK         bool   `json:"ok"`
-	Message    string `json:"message"`
-	ErrorCode  string `json:"error_code,omitempty"`
-	CompletedAt string `json:"completed_at"`
-	Version    string `json:"version,omitempty"`
+	Kind          string         `json:"kind"`
+	RequestID     string         `json:"request_id"`
+	DeviceID      string         `json:"device_id"`
+	OK            bool           `json:"ok"`
+	Message       string         `json:"message"`
+	ErrorCode     string         `json:"error_code,omitempty"`
+	ResultPayload map[string]any `json:"result_payload,omitempty"`
+	CompletedAt   string         `json:"completed_at"`
+	Version       string         `json:"version,omitempty"`
 }

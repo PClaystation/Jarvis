@@ -164,6 +164,18 @@ function normalizeRequiredString(value: unknown, maxLength: number): string | nu
   return trimmed;
 }
 
+function normalizeOptionalObject(value: unknown): Record<string, unknown> | null {
+  if (value === undefined) {
+    return null;
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  return value as Record<string, unknown>;
+}
+
 function normalizeCapabilities(value: unknown): string[] | null {
   if (!Array.isArray(value)) {
     return null;
@@ -259,7 +271,8 @@ function asResultMessage(value: Record<string, unknown>): AgentResultMessage | n
 
   const requestId = normalizeRequiredString(value.request_id, 100);
   const deviceId = normalizeRequiredString(value.device_id, 32);
-  const message = normalizeRequiredString(value.message, 1000);
+  const message = normalizeRequiredString(value.message, 4000);
+  const resultPayload = normalizeOptionalObject(value.result_payload);
   const completedAt = normalizeRequiredString(value.completed_at, 80);
 
   if (
@@ -292,6 +305,7 @@ function asResultMessage(value: Record<string, unknown>): AgentResultMessage | n
     message,
     error_code:
       value.error_code === undefined ? undefined : normalizeRequiredString(value.error_code, 100) ?? undefined,
+    result_payload: resultPayload ?? undefined,
     completed_at: completedAt,
     version: value.version === undefined ? undefined : normalizeRequiredString(value.version, 64) ?? undefined,
   };
@@ -449,6 +463,7 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
               ok: result.ok,
               message: result.message,
               error_code: result.error_code ?? null,
+              result_payload: result.result_payload ?? null,
               completed_at: result.completed_at,
               version: result.version ?? null,
             });

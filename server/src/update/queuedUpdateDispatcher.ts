@@ -68,6 +68,7 @@ function publishCommandLogEvent(
     parsedTarget: string;
     status: string;
     message: string | null;
+    resultPayload?: Record<string, unknown> | null;
     errorCode?: string | null;
   },
 ): void {
@@ -80,6 +81,7 @@ function publishCommandLogEvent(
     parsed_type: "AGENT_UPDATE",
     status: input.status,
     message: input.message,
+    result_payload: input.resultPayload ?? null,
     error_code: input.errorCode ?? null,
     ts: new Date().toISOString(),
   });
@@ -179,6 +181,7 @@ export class QueuedUpdateDispatcher {
         id: queuedUpdate.id,
         status: result.ok ? "ok" : "failed",
         resultMessage: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
 
@@ -190,6 +193,7 @@ export class QueuedUpdateDispatcher {
         parsedTarget: queuedUpdate.parsed_target,
         status: result.ok ? "ok" : "failed",
         message: result.message,
+        resultPayload: result.result_payload,
         errorCode: result.error_code,
       });
 

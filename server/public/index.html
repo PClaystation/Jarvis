@@ -42,6 +42,14 @@
           <button id="renameDeviceBtn" type="button">Save Name</button>
         </div>
         <p class="muted">Saved on the server so every remote sees the same label. Leave the name empty to clear it.</p>
+        <label for="aliasDeviceInput">Device App Aliases</label>
+        <div class="row">
+          <input id="aliasDeviceInput" type="text" placeholder="t1" />
+          <input id="aliasKeyInput" type="text" placeholder="Alias phrase (e.g. browser work)" />
+          <input id="aliasAppInput" type="text" placeholder="Canonical app (e.g. chrome)" />
+          <button id="saveAliasBtn" type="button">Save Alias</button>
+        </div>
+        <p class="muted">Maps custom `open ...` phrases to built-in app targets for one device.</p>
         <div id="deviceCards" class="device-cards"></div>
         <ul id="deviceList" class="list"></ul>
       </section>

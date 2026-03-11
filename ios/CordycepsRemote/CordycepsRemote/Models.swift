@@ -188,8 +188,20 @@ struct CommandRequest: Encodable {
   let request_id: String
   let text: String
   let source: String
+  let is_async: Bool
+  let timeout_ms: Int?
   let sent_at: String
   let client_version: String
+
+  enum CodingKeys: String, CodingKey {
+    case request_id
+    case text
+    case source
+    case is_async = "async"
+    case timeout_ms
+    case sent_at
+    case client_version
+  }
 }
 
 struct UpdateRequest: Encodable {
