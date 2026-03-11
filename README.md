@@ -200,7 +200,7 @@ cd e1
 2. Run `e1/dist/e1-agent-usb.exe` once on the target device.
 
 On first run it self-installs to `%LOCALAPPDATA%\E1Agent\e1-agent.exe` and auto-designates `e*` IDs when `-DeviceId` is omitted.
-`e1` keeps remote self-update support, but emergency execution is hardened with strict command gating, cooldown, local audit log, and automatic rollback of temporary network isolation.
+`e1` keeps remote self-update support, but emergency execution is hardened with an explicit local command allowlist, restart-persistent cooldown, local audit log, persisted panic-active state, rollback-on-failure cleanup, and automatic rollback of temporary network isolation. While panic mode is active, only `ping`, `lock`, and another confirmed emergency command remain locally executable.
 
 Management:
 
@@ -242,7 +242,7 @@ cd se1
 2. Run `se1/dist/se1-agent-usb.exe` once on the target device.
 
 On first run it self-installs to `%LOCALAPPDATA%\SE1Agent\se1-agent.exe` and auto-designates `se*` IDs when `-DeviceId` is omitted.
-`se1` keeps remote self-update support, exposes only the safer everyday commands, and adds the emergency lockdown path with cooldown, audit log, and automatic rollback of temporary network isolation.
+`se1` keeps remote self-update support, exposes only the safer everyday commands through an explicit allowlist, and adds the emergency lockdown path with restart-persistent cooldown, audit log, persisted panic-active state, rollback-on-failure cleanup, and automatic rollback of temporary network isolation. While panic mode is active, normal media/app/clipboard/display commands are blocked until rollback clears the local emergency state.
 
 Management:
 

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -20,6 +21,7 @@ const emergencyCommandTimeout = 20 * time.Second
 const emergencyCooldown = 60 * time.Second
 const emergencyRollbackMinutes = 30
 const maxClipboardTextLength = 1000
+const emergencyActiveCommandGrace = 5 * time.Second
 
 var enabledCommandTypes = map[string]struct{}{
 	"PING":               {},
@@ -31,6 +33,12 @@ var emergencyState struct {
 	mu            sync.Mutex
 	inProgress    bool
 	lastTriggered time.Time
+}
+
+type emergencyStatus struct {
+	ActiveUntil   string `json:"active_until,omitempty"`
+	LastTriggered string `json:"last_triggered,omitempty"`
+	LastRequestID string `json:"last_request_id,omitempty"`
 }
 
 var openAppTargets = map[string]string{
@@ -92,6 +100,16 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 	commandType := strings.ToUpper(strings.TrimSpace(command.Type))
 	if !isEnabledCommandType(commandType) {
 		return handleErr(fmt.Errorf("%s is disabled in E1 safety profile", commandType), "COMMAND_DISABLED")
+	}
+
+	if isRestrictedDuringEmergency(commandType) {
+		active, until, err := emergencyActiveWindow()
+		if err != nil {
+			return handleErr(fmt.Errorf("read emergency status: %w", err), "EMERGENCY_STATE_FAILED")
+		}
+		if active {
+			return handleErr(fmt.Errorf("%s is blocked while emergency lockdown remains active until %s", commandType, until.UTC().Format(time.RFC3339)), "EMERGENCY_ACTIVE")
+		}
 	}
 
 	switch commandType {
@@ -302,6 +320,15 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 func isEnabledCommandType(commandType string) bool {
 	_, ok := enabledCommandTypes[commandType]
 	return ok
+}
+
+func isRestrictedDuringEmergency(commandType string) bool {
+	switch commandType {
+	case "PING", "LOCK_PC", "EMERGENCY_LOCKDOWN":
+		return false
+	default:
+		return true
+	}
 }
 
 func readStringArg(args map[string]any, key string) (string, error) {
@@ -546,57 +573,99 @@ func emergencyLockdown(requestID string) error {
 	writeEmergencyAudit(requestID, "started")
 
 	rollbackSeconds := emergencyRollbackMinutes * 60
+	statePath, err := emergencyStatusPath()
+	if err != nil {
+		writeEmergencyAudit(requestID, fmt.Sprintf("failed:resolve-state-path:%v", err))
+		return err
+	}
+
+	activeUntil := time.Now().Add(time.Duration(rollbackSeconds)*time.Second + emergencyActiveCommandGrace).UTC()
 	script := fmt.Sprintf(`
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
 $ruleGroup = "E1EmergencyLockdown"
 $rollbackSeconds = %d
+$statePath = %s
+$activeUntil = %s
+$requestId = %s
+$stateDir = Split-Path -Parent $statePath
+$statusPayload = @{
+  active_until = $activeUntil
+  last_triggered = (Get-Date).ToUniversalTime().ToString("o")
+  last_request_id = $requestId
+} | ConvertTo-Json -Compress
 
-# Refresh firewall lockdown rules (block all in/out) without mutating long-term defaults.
-Get-NetFirewallRule -Group $ruleGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule | Out-Null
-New-NetFirewallRule -DisplayName "E1 Emergency Block Outbound" -Group $ruleGroup -Direction Outbound -Action Block -Profile Any -Enabled True | Out-Null
-New-NetFirewallRule -DisplayName "E1 Emergency Block Inbound" -Group $ruleGroup -Direction Inbound -Action Block -Profile Any -Enabled True | Out-Null
-
-# Tight isolation: disable active physical adapters right away.
-$activeAdapters = @(Get-NetAdapter -Physical | Where-Object { $_.Status -eq "Up" })
-foreach ($adapter in $activeAdapters) {
-  try { Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction Stop | Out-Null } catch {}
+function Clear-EmergencyIsolation {
+  Get-NetFirewallRule -Group $ruleGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule | Out-Null
+  Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Enable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+  if (Test-Path -LiteralPath $statePath) {
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+  }
 }
 
-# Best-effort session disconnect to isolate immediately.
-cmd.exe /C "ipconfig /release" | Out-Null
-
-# Drop mapped network drives and SMB shares.
-cmd.exe /C "net use * /delete /y" | Out-Null
-Get-SmbMapping | ForEach-Object {
-  try { Remove-SmbMapping -LocalPath $_.LocalPath -Force -UpdateProfile -ErrorAction Stop | Out-Null } catch {}
+if (-not (Test-Path -LiteralPath $stateDir)) {
+  New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 }
 
-# Stop common sync clients to reduce spread.
-$syncApps = @("OneDrive","Dropbox","GoogleDriveFS","iCloudDrive","iCloudServices","Box","BoxSync","MegaSync","SynologyDrive")
-foreach ($name in $syncApps) {
-  Get-Process -Name $name | Stop-Process -Force -ErrorAction SilentlyContinue
+try {
+  # Refresh firewall lockdown rules (block all in/out) without mutating long-term defaults.
+  Get-NetFirewallRule -Group $ruleGroup -ErrorAction SilentlyContinue | Remove-NetFirewallRule | Out-Null
+  New-NetFirewallRule -DisplayName "E1 Emergency Block Outbound" -Group $ruleGroup -Direction Outbound -Action Block -Profile Any -Enabled True | Out-Null
+  New-NetFirewallRule -DisplayName "E1 Emergency Block Inbound" -Group $ruleGroup -Direction Inbound -Action Block -Profile Any -Enabled True | Out-Null
+  $ruleCount = @(Get-NetFirewallRule -Group $ruleGroup -ErrorAction SilentlyContinue).Count
+  if ($ruleCount -lt 2) {
+    throw "failed to activate firewall isolation"
+  }
+
+  # Tight isolation: disable active physical adapters right away.
+  $activeAdapters = @(Get-NetAdapter -Physical | Where-Object { $_.Status -eq "Up" })
+  foreach ($adapter in $activeAdapters) {
+    try { Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction Stop | Out-Null } catch {}
+  }
+
+  # Best-effort session disconnect to isolate immediately.
+  cmd.exe /C "ipconfig /release" | Out-Null
+
+  # Drop mapped network drives and SMB shares.
+  cmd.exe /C "net use * /delete /y" | Out-Null
+  Get-SmbMapping | ForEach-Object {
+    try { Remove-SmbMapping -LocalPath $_.LocalPath -Force -UpdateProfile -ErrorAction Stop | Out-Null } catch {}
+  }
+
+  # Stop common sync clients to reduce spread.
+  $syncApps = @("OneDrive","Dropbox","GoogleDriveFS","iCloudDrive","iCloudServices","Box","BoxSync","MegaSync","SynologyDrive")
+  foreach ($name in $syncApps) {
+    Get-Process -Name $name | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+
+  # Close interactive apps but keep shell/system essentials alive.
+  $safeApps = @("System","Registry","smss","csrss","wininit","services","lsass","winlogon","explorer","ShellExperienceHost","StartMenuExperienceHost","SearchHost","TextInputHost","RuntimeBroker","taskhostw","dwm","ctfmon","conhost","powershell","pwsh","cmd","e1-agent")
+  Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $safeApps -notcontains $_.ProcessName } | ForEach-Object {
+    try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {}
+  }
+
+  # Failsafe rollback so emergency mode does not permanently lock out networking.
+  $rollbackCommand = 'Start-Sleep -Seconds ' + $rollbackSeconds + '; Get-NetFirewallRule -Group ''' + $ruleGroup + ''' -ErrorAction SilentlyContinue | Remove-NetFirewallRule | Out-Null; Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Enable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue | Out-Null; if (Test-Path -LiteralPath ''' + $statePath + ''') { Remove-Item -LiteralPath ''' + $statePath + ''' -Force -ErrorAction SilentlyContinue }'
+  $rollbackProcess = Start-Process -WindowStyle Hidden powershell -PassThru -ArgumentList @("-NoProfile","-NonInteractive","-WindowStyle","Hidden","-Command",$rollbackCommand)
+  if (-not $rollbackProcess) {
+    throw "failed to schedule rollback process"
+  }
+
+  Set-Content -LiteralPath $statePath -Value $statusPayload -Encoding UTF8 -Force
+  rundll32.exe user32.dll,LockWorkStation | Out-Null
+} catch {
+  Clear-EmergencyIsolation
+  throw
 }
-
-# Close interactive apps but keep shell/system essentials alive.
-$safeApps = @("System","Registry","smss","csrss","wininit","services","lsass","winlogon","explorer","ShellExperienceHost","StartMenuExperienceHost","SearchHost","TextInputHost","RuntimeBroker","taskhostw","dwm","ctfmon","conhost","powershell","pwsh","cmd","e1-agent")
-Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $safeApps -notcontains $_.ProcessName } | ForEach-Object {
-  try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {}
-}
-
-# Failsafe rollback so emergency mode does not permanently lock out networking.
-$rollbackCommand = "Start-Sleep -Seconds $rollbackSeconds; Get-NetFirewallRule -Group '$ruleGroup' -ErrorAction SilentlyContinue | Remove-NetFirewallRule | Out-Null; Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Enable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue | Out-Null"
-Start-Process -WindowStyle Hidden powershell -ArgumentList @("-NoProfile","-NonInteractive","-WindowStyle","Hidden","-Command",$rollbackCommand) | Out-Null
-
-rundll32.exe user32.dll,LockWorkStation | Out-Null
-`, rollbackSeconds)
+`, rollbackSeconds, psSingleQuoted(statePath), psSingleQuoted(activeUntil.Format(time.RFC3339)), psSingleQuoted(strings.TrimSpace(requestID)))
 
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script)
 	if err := runWithTimeout(cmd, emergencyCommandTimeout); err != nil {
+		_ = clearEmergencyStatus()
 		writeEmergencyAudit(requestID, fmt.Sprintf("failed:%v", err))
 		return fmt.Errorf("run emergency lockdown: %w", err)
 	}
 
-	writeEmergencyAudit(requestID, "completed")
+	writeEmergencyAudit(requestID, fmt.Sprintf("completed:active-until=%s", activeUntil.Format(time.RFC3339)))
 	return nil
 }
 
@@ -607,6 +676,14 @@ func beginEmergencyLockdown() error {
 	now := time.Now()
 	if emergencyState.inProgress {
 		return errors.New("emergency lockdown is already running")
+	}
+
+	lastTriggered, err := readEmergencyCooldown()
+	if err != nil {
+		return fmt.Errorf("read emergency cooldown: %w", err)
+	}
+	if !lastTriggered.IsZero() && lastTriggered.After(emergencyState.lastTriggered) {
+		emergencyState.lastTriggered = lastTriggered
 	}
 
 	if !emergencyState.lastTriggered.IsZero() {
@@ -626,6 +703,132 @@ func endEmergencyLockdown() {
 	defer emergencyState.mu.Unlock()
 	emergencyState.inProgress = false
 	emergencyState.lastTriggered = time.Now()
+	_ = writeEmergencyCooldown(emergencyState.lastTriggered)
+}
+
+func emergencyStatusPath() (string, error) {
+	programData := strings.TrimSpace(os.Getenv("PROGRAMDATA"))
+	if programData == "" {
+		return "", errors.New("PROGRAMDATA is not set")
+	}
+
+	statusDir := filepath.Join(programData, "E1Agent")
+	if err := os.MkdirAll(statusDir, 0o700); err != nil {
+		return "", fmt.Errorf("create emergency status dir: %w", err)
+	}
+
+	return filepath.Join(statusDir, "emergency-status.json"), nil
+}
+
+func emergencyActiveWindow() (bool, time.Time, error) {
+	statusPath, err := emergencyStatusPath()
+	if err != nil {
+		return false, time.Time{}, err
+	}
+
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, time.Time{}, nil
+		}
+		return false, time.Time{}, err
+	}
+
+	var status emergencyStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return false, time.Time{}, err
+	}
+
+	if strings.TrimSpace(status.ActiveUntil) == "" {
+		_ = os.Remove(statusPath)
+		return false, time.Time{}, nil
+	}
+
+	activeUntil, err := time.Parse(time.RFC3339, status.ActiveUntil)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+
+	if time.Now().UTC().Before(activeUntil) {
+		return true, activeUntil, nil
+	}
+
+	_ = os.Remove(statusPath)
+	return false, activeUntil, nil
+}
+
+func clearEmergencyStatus() error {
+	statusPath, err := emergencyStatusPath()
+	if err != nil {
+		return err
+	}
+
+	if err := os.Remove(statusPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	return nil
+}
+
+func emergencyCooldownPath() (string, error) {
+	programData := strings.TrimSpace(os.Getenv("PROGRAMDATA"))
+	if programData == "" {
+		return "", errors.New("PROGRAMDATA is not set")
+	}
+
+	statusDir := filepath.Join(programData, "E1Agent")
+	if err := os.MkdirAll(statusDir, 0o700); err != nil {
+		return "", fmt.Errorf("create emergency status dir: %w", err)
+	}
+
+	return filepath.Join(statusDir, "emergency-cooldown.json"), nil
+}
+
+func readEmergencyCooldown() (time.Time, error) {
+	cooldownPath, err := emergencyCooldownPath()
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	data, err := os.ReadFile(cooldownPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+
+	var status emergencyStatus
+	if err := json.Unmarshal(data, &status); err != nil {
+		return time.Time{}, err
+	}
+
+	if strings.TrimSpace(status.LastTriggered) == "" {
+		return time.Time{}, nil
+	}
+
+	return time.Parse(time.RFC3339, status.LastTriggered)
+}
+
+func writeEmergencyCooldown(triggeredAt time.Time) error {
+	cooldownPath, err := emergencyCooldownPath()
+	if err != nil {
+		return err
+	}
+
+	payload := emergencyStatus{
+		LastTriggered: triggeredAt.UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(cooldownPath, data, 0o600)
+}
+
+func psSingleQuoted(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func writeEmergencyAudit(requestID string, status string) {
