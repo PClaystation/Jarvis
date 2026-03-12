@@ -2,6 +2,7 @@ import type { CommandType, ParseError, ParsedExternalCommand, TypedCommand } fro
 
 const MAX_NOTIFY_TEXT_LENGTH = 180;
 const MAX_CLIPBOARD_TEXT_LENGTH = 1000;
+const MAX_TYPE_TEXT_LENGTH = 1000;
 const MAX_REPEAT_STEPS = 20;
 const MAX_ADMIN_INPUT_LENGTH = 4000;
 const MAX_ADMIN_FILE_TEXT_LENGTH = 128 * 1024;
@@ -552,6 +553,41 @@ function parseClipboard(rawCommandPhrase: string): TypedCommand | ParseError | n
   };
 }
 
+function parseTypeText(rawCommandPhrase: string): TypedCommand | ParseError | null {
+  const trimmed = rawCommandPhrase.trim();
+  if (/^type[,.!?;:]*$/i.test(trimmed)) {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: "type requires text",
+    };
+  }
+
+  const typeMatch = trimmed.match(/^type(?:[,.!?;:]+\s*|\s+)([\s\S]+)$/i);
+  if (!typeMatch) {
+    return null;
+  }
+
+  const text = typeMatch[1] ?? "";
+  if (!text.trim()) {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: "type requires text",
+    };
+  }
+
+  if (text.length > MAX_TYPE_TEXT_LENGTH) {
+    return {
+      code: "MALFORMED_ARGUMENT",
+      message: `type text too long (max ${MAX_TYPE_TEXT_LENGTH})`,
+    };
+  }
+
+  return {
+    type: "TYPE_TEXT",
+    args: { text },
+  };
+}
+
 function parseEmergencyLockdown(commandPhrase: string): TypedCommand | ParseError | null {
   const normalizedPhrase = stripTrailingPunctuation(stripPoliteSuffix(commandPhrase));
   if (!normalizedPhrase) {
@@ -1098,6 +1134,11 @@ function parseCommandPhrase(rawCommandPhrase: string, normalizedCommandPhrase: s
   const clipboardCommand = parseClipboard(rawCommandPhrase);
   if (clipboardCommand) {
     return clipboardCommand;
+  }
+
+  const typeTextCommand = parseTypeText(rawCommandPhrase);
+  if (typeTextCommand) {
+    return typeTextCommand;
   }
 
   return {

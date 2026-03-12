@@ -59,3 +59,17 @@ test("parser preserves notify and clipboard text payload casing", () => {
   assert.equal(clipboardParsed.command.type, "CLIPBOARD_SET");
   assert.deepEqual(clipboardParsed.command.args, { text: "Keep  CASE  x" });
 });
+
+test("parser supports type command text payload casing", () => {
+  const typedParsed = parseExternalCommand("t1 type Hello + world {test}");
+  assert.ok(!("code" in typedParsed));
+  assert.equal(typedParsed.command.type, "TYPE_TEXT");
+  assert.deepEqual(typedParsed.command.args, { text: "Hello + world {test}" });
+});
+
+test("parser rejects type command without text", () => {
+  const parsed = parseExternalCommand("t1 type");
+  assert.ok("code" in parsed);
+  assert.equal(parsed.code, "MALFORMED_ARGUMENT");
+  assert.match(parsed.message, /type requires text/i);
+});

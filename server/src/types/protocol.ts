@@ -45,6 +45,7 @@ export type CommandType =
   | "SHORTCUT_SELECT_ALL"
   | "SHORTCUT_ALT_TAB"
   | "SHORTCUT_ALT_F4"
+  | "TYPE_TEXT"
   | "LOCK_PC"
   | "NOTIFY"
   | "CLIPBOARD_SET"

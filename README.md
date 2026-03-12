@@ -55,6 +55,7 @@ Simple copy/paste operation guide: [docs/easy-operations.md](docs/easy-operation
   - `LOCK_PC`
   - `NOTIFY`
   - `CLIPBOARD_SET`
+  - `TYPE_TEXT` (implemented in `t1`, `e1`, and `a1` agent families)
   - `SYSTEM_SLEEP`, `SYSTEM_DISPLAY_OFF`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`
   - `AGENT_REMOVE` (local host must approve via multi-step prompt)
   - `EMERGENCY_LOCKDOWN` (implemented in `e1` and `se1` agent families only)
@@ -109,6 +110,7 @@ Examples:
 - `m2 volume down 4`
 - `m3 lock`
 - `m1 clipboard copied from jarvis`
+- `t1 type hello from remote`
 - `m1 display off`
 - `m1 sign out`
 - `m1 open vscode`
@@ -145,6 +147,7 @@ Notes:
 - `all` is intentionally restricted to `ping` to avoid accidental colony-wide actions
 - `volume up/down`, `next`, and `previous` support optional numeric repeats (`1-20`)
 - app launch verbs supported: `open`, `launch`, `start`
+- `type <text>` sends literal keyboard text to the focused window (available on `t`, `e`, and `a` profiles)
 - emergency command requires explicit confirmation (`panic confirm`, `lockdown confirm`, or `emergency confirm`)
 - agent removal requires explicit remote confirmation (`remove agent confirm confirm`); no local host interaction is required on the target PC
 - admin commands must use `admin ...` and are dispatched only to devices that advertise `admin_ops` capability (A1 family)

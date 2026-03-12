@@ -1496,6 +1496,169 @@ test("profile policy blocks lite agents from standard power commands", async () 
   }
 });
 
+test("profile policy allows type text for t/e/a and blocks lite profiles", async () => {
+  const harness = await createHarness();
+  const { server, router, cleanup } = harness;
+
+  try {
+    addOnlineDevice(harness, {
+      deviceId: "s1",
+      capabilities: ["profile_s", "media_control", "locking", "open_app", "notifications", "clipboard_control", "updater"],
+    });
+
+    const blockedS = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "s1 type hello from remote",
+      },
+    });
+
+    assert.equal(blockedS.statusCode, 409);
+    assert.equal(blockedS.json().error_code, "COMMAND_NOT_ALLOWED_FOR_PROFILE");
+
+    addOnlineDevice(harness, {
+      deviceId: "se1",
+      capabilities: [
+        "profile_se",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "updater",
+        "emergency_lockdown",
+      ],
+    });
+
+    const blockedSe = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "se1 type hello from remote",
+      },
+    });
+
+    assert.equal(blockedSe.statusCode, 409);
+    assert.equal(blockedSe.json().error_code, "COMMAND_NOT_ALLOWED_FOR_PROFILE");
+
+    addOnlineDevice(harness, {
+      deviceId: "t1",
+      capabilities: [
+        "profile_t",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "keyboard_control",
+        "advanced_keyboard_control",
+        "power_control",
+        "session_control",
+        "updater",
+      ],
+    });
+
+    const allowedT = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "t1 type Hello T",
+      },
+    });
+
+    assert.equal(allowedT.statusCode, 200);
+    assert.equal(allowedT.json().parsed_type, "TYPE_TEXT");
+    assert.equal(
+      router.dispatchedToDevice.some(
+        (item) => item.deviceId === "t1" && item.type === "TYPE_TEXT" && item.args.text === "Hello T",
+      ),
+      true,
+    );
+
+    addOnlineDevice(harness, {
+      deviceId: "e1",
+      capabilities: [
+        "profile_e",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "keyboard_control",
+        "advanced_keyboard_control",
+        "power_control",
+        "session_control",
+        "updater",
+        "emergency_lockdown",
+      ],
+    });
+
+    const allowedE = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "e1 type Hello E",
+      },
+    });
+
+    assert.equal(allowedE.statusCode, 200);
+    assert.equal(allowedE.json().parsed_type, "TYPE_TEXT");
+    assert.equal(
+      router.dispatchedToDevice.some(
+        (item) => item.deviceId === "e1" && item.type === "TYPE_TEXT" && item.args.text === "Hello E",
+      ),
+      true,
+    );
+
+    addOnlineDevice(harness, {
+      deviceId: "a1",
+      capabilities: [
+        "profile_a",
+        "admin_ops",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "keyboard_control",
+        "advanced_keyboard_control",
+        "power_control",
+        "session_control",
+        "updater",
+      ],
+    });
+
+    const allowedA = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "a1 type Hello A",
+      },
+    });
+
+    assert.equal(allowedA.statusCode, 200);
+    assert.equal(allowedA.json().parsed_type, "TYPE_TEXT");
+    assert.equal(
+      router.dispatchedToDevice.some(
+        (item) => item.deviceId === "a1" && item.type === "TYPE_TEXT" && item.args.text === "Hello A",
+      ),
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
 test("profile policy keeps emergency command available to se profile", async () => {
   const harness = await createHarness();
   const { server, router, cleanup } = harness;

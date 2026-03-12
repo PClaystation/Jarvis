@@ -1665,6 +1665,10 @@ final class RemoteViewModel: ObservableObject {
       return argument.isEmpty ? "\(target) \(action) copied from cordyceps" : "\(target) \(action) \(argument)"
     }
 
+    if action == "type" {
+      return argument.isEmpty ? "\(target) type hello from remote" : "\(target) type \(argument)"
+    }
+
     if !argument.isEmpty, CommandLibrary.repeatableActions.contains(action) {
       return "\(target) \(action) \(argument)"
     }
@@ -1699,7 +1703,7 @@ final class RemoteViewModel: ObservableObject {
       return "keyboard_control"
     }
 
-    if ["enter", "escape", "tab", "space", "up", "down", "left", "right", "backspace", "delete", "home", "end", "page up", "page down", "copy shortcut", "paste shortcut", "cut shortcut", "undo shortcut", "redo shortcut", "select all shortcut", "alt tab", "alt f4"].contains(normalized) {
+    if ["enter", "escape", "tab", "space", "up", "down", "left", "right", "backspace", "delete", "home", "end", "page up", "page down", "copy shortcut", "paste shortcut", "cut shortcut", "undo shortcut", "redo shortcut", "select all shortcut", "alt tab", "alt f4", "type"].contains(normalized) {
       return "advanced_keyboard_control"
     }
 

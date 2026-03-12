@@ -172,6 +172,7 @@ const COMMAND_LIBRARY = [
   { value: "select all shortcut", label: "select all shortcut", category: "Keyboard", keywords: ["ctrl a"] },
   { value: "alt tab", label: "alt tab", category: "Keyboard", keywords: ["switch app", "task switch"] },
   { value: "alt f4", label: "alt f4", category: "Keyboard", keywords: ["close window", "quit app"] },
+  { value: "type", label: "type (requires text)", category: "Keyboard", keywords: ["type text", "keyboard text", "text input"] },
   { value: "open spotify", label: "open spotify", category: "Apps", keywords: ["launch spotify"] },
   { value: "open discord", label: "open discord", category: "Apps", keywords: ["launch discord"] },
   { value: "open chrome", label: "open chrome", category: "Apps", keywords: ["browser"] },
@@ -289,6 +290,9 @@ const ACTION_VALUE_ALIASES = new Map([
   ["task switch", "alt tab"],
   ["close window", "alt f4"],
   ["quit app", "alt f4"],
+  ["type text", "type"],
+  ["keyboard type", "type"],
+  ["keyboard text", "type"],
   ["open file explorer", "open explorer"],
   ["open vs code", "open vscode"],
   ["open visual studio code", "open vscode"],
@@ -367,6 +371,7 @@ const ACTION_REQUIRED_CAPABILITY = new Map([
   ["select all shortcut", "advanced_keyboard_control"],
   ["alt tab", "advanced_keyboard_control"],
   ["alt f4", "advanced_keyboard_control"],
+  ["type", "advanced_keyboard_control"],
   ["open spotify", "open_app"],
   ["open discord", "open_app"],
   ["open chrome", "open_app"],
@@ -914,6 +919,10 @@ function composeCommand() {
 
   if (action === "clipboard" || action === "copy") {
     return arg ? `${target} ${action} ${arg}` : `${target} ${action} copied from jarvis`;
+  }
+
+  if (action === "type") {
+    return arg ? `${target} type ${arg}` : `${target} type hello from remote`;
   }
 
   if (arg && REPEATABLE_ACTIONS.has(action)) {

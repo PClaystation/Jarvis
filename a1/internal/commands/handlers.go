@@ -21,6 +21,7 @@ import (
 const commandTimeout = 8 * time.Second
 const adminCommandTimeout = 45 * time.Second
 const maxClipboardTextLength = 1000
+const maxTypeTextLength = 1000
 const maxAdminInputLength = 4000
 const maxAdminResultLength = 900
 const maxAdminFileReadBytes = 16 * 1024
@@ -291,6 +292,19 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 
 		result.OK = true
 		result.Message = fmt.Sprintf("%s sent", strings.ToLower(strings.ReplaceAll(action, "_", " ")))
+		return result
+	case "TYPE_TEXT":
+		text, err := readStringArg(command.Args, "text")
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := sendTypedText(text); err != nil {
+			return handleErr(err, "KEYBOARD_FAILED")
+		}
+
+		result.OK = true
+		result.Message = "Text typed"
 		return result
 	case "LOCK_PC":
 		if err := lockPC(); err != nil {
@@ -977,6 +991,45 @@ func sendKeyboardAction(action string) error {
 	}
 
 	return sendKeyboardSequence(sequence)
+}
+
+func sendTypedText(text string) error {
+	if len(text) > maxTypeTextLength {
+		return fmt.Errorf("typed text too long (max %d)", maxTypeTextLength)
+	}
+
+	sequence := escapeSendKeysText(text)
+	if sequence == "" {
+		return errors.New("typed text must include at least one character")
+	}
+
+	return sendKeyboardSequence(sequence)
+}
+
+func escapeSendKeysText(text string) string {
+	var builder strings.Builder
+	for _, r := range text {
+		switch r {
+		case '\r':
+			continue
+		case '\n':
+			builder.WriteString("{ENTER}")
+		case '\t':
+			builder.WriteString("{TAB}")
+		case '+', '^', '%', '~', '(', ')', '[', ']':
+			builder.WriteRune('{')
+			builder.WriteRune(r)
+			builder.WriteRune('}')
+		case '{':
+			builder.WriteString("{{}")
+		case '}':
+			builder.WriteString("{}}")
+		default:
+			builder.WriteRune(r)
+		}
+	}
+
+	return builder.String()
 }
 
 func sendKeyboardSequence(sequence string) error {

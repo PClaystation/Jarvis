@@ -13,16 +13,16 @@ Cordyceps has five intentionally distinct agent strains:
 ### `s` (lite)
 
 - Includes: `PING`, media, volume, `OPEN_APP`, `LOCK_PC`, `NOTIFY`, `CLIPBOARD_SET`, `SYSTEM_DISPLAY_OFF`, `AGENT_UPDATE`.
-- Excludes: `SYSTEM_SLEEP`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`, `AGENT_REMOVE`, `EMERGENCY_LOCKDOWN`, admin commands.
+- Excludes: `TYPE_TEXT`, `SYSTEM_SLEEP`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`, `AGENT_REMOVE`, `EMERGENCY_LOCKDOWN`, admin commands.
 
 ### `se` (lite + emergency)
 
 - Includes: everything in `s` + `EMERGENCY_LOCKDOWN`.
-- Excludes: `SYSTEM_SLEEP`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`, `AGENT_REMOVE`, admin commands.
+- Excludes: `TYPE_TEXT`, `SYSTEM_SLEEP`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`, `AGENT_REMOVE`, admin commands.
 
 ### `t` (standard)
 
-- Includes: everything in `s` + `SYSTEM_SLEEP`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`, `AGENT_REMOVE`.
+- Includes: everything in `s` + `TYPE_TEXT`, `SYSTEM_SLEEP`, `SYSTEM_SIGN_OUT`, `SYSTEM_SHUTDOWN`, `SYSTEM_RESTART`, `AGENT_REMOVE`.
 - Excludes: `EMERGENCY_LOCKDOWN`, admin commands.
 
 ### `e` (standard + secure emergency)

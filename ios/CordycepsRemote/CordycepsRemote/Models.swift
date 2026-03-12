@@ -355,7 +355,11 @@ struct CommandLibraryEntry: Identifiable, Hashable {
   }
 
   var usesArgument: Bool {
-    normalizedValue == "notify" || normalizedValue == "clipboard" || normalizedValue == "copy" || CommandLibrary.repeatableActions.contains(normalizedValue)
+    normalizedValue == "notify" ||
+      normalizedValue == "clipboard" ||
+      normalizedValue == "copy" ||
+      normalizedValue == "type" ||
+      CommandLibrary.repeatableActions.contains(normalizedValue)
   }
 
   var placeholderArgument: String {
@@ -365,6 +369,10 @@ struct CommandLibraryEntry: Identifiable, Hashable {
 
     if normalizedValue == "clipboard" || normalizedValue == "copy" {
       return "copied from cordyceps"
+    }
+
+    if normalizedValue == "type" {
+      return "text to type"
     }
 
     if normalizedValue == "brightness up" || normalizedValue == "brightness down" {
@@ -426,6 +434,7 @@ enum CommandLibrary {
     .init(value: "select all shortcut", label: "select all shortcut", category: "Keyboard", keywords: ["ctrl a"]),
     .init(value: "alt tab", label: "alt tab", category: "Keyboard", keywords: ["switch app", "task switch"]),
     .init(value: "alt f4", label: "alt f4", category: "Keyboard", keywords: ["close window", "quit app"]),
+    .init(value: "type", label: "type (requires text)", category: "Keyboard", keywords: ["type text", "keyboard text", "text input"]),
     .init(value: "open spotify", label: "open spotify", category: "Apps", keywords: ["launch spotify"]),
     .init(value: "open discord", label: "open discord", category: "Apps", keywords: ["launch discord"]),
     .init(value: "open chrome", label: "open chrome", category: "Apps", keywords: ["browser"]),
@@ -533,6 +542,9 @@ enum CommandLibrary {
     "task switch": "alt tab",
     "close window": "alt f4",
     "quit app": "alt f4",
+    "type text": "type",
+    "keyboard type": "type",
+    "keyboard text": "type",
     "open file explorer": "open explorer",
     "open vs code": "open vscode",
     "open visual studio code": "open vscode",
