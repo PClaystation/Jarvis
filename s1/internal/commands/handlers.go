@@ -49,6 +49,7 @@ func Capabilities() []string {
 		"locking",
 		"open_app",
 		"updater",
+		"privileged_helper_split",
 		"lite_profile_s1",
 	}
 }

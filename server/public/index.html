@@ -175,6 +175,14 @@
         <input id="updateShaInput" type="text" placeholder="64-char hex (optional)" />
         <label for="updateSizeInput">Size bytes (optional)</label>
         <input id="updateSizeInput" type="text" placeholder="optional exact byte count" />
+        <label for="updateSignatureKeyIdInput">Signature Key ID (optional)</label>
+        <input id="updateSignatureKeyIdInput" type="text" placeholder="release-2026" />
+        <label for="updateSignatureInput">Detached Signature (base64, optional)</label>
+        <textarea id="updateSignatureInput" rows="2" placeholder="ed25519 signature over canonical update metadata"></textarea>
+        <label for="updateUsePrivilegedHelperInput" class="checkbox-line">
+          <input id="updateUsePrivilegedHelperInput" type="checkbox" />
+          Use privileged helper split (optional; may trigger UAC prompt on target)
+        </label>
         <label for="updateQueueOfflineInput" class="checkbox-line">
           <input id="updateQueueOfflineInput" type="checkbox" checked />
           Queue update if target is offline (single target only)
@@ -213,6 +221,20 @@
         <label for="newApiKeyBox">Last Generated API Key (shown once)</label>
         <textarea id="newApiKeyBox" rows="2" placeholder="No key generated yet." readonly></textarea>
         <div id="apiKeyList" class="history-list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Token Rotation</h2>
+        <p class="muted">Owner-only rotation with optional owner-token grace window to avoid lockouts.</p>
+        <label for="ownerGraceSecondsInput">Owner Grace Seconds (0-3600)</label>
+        <input id="ownerGraceSecondsInput" type="number" min="0" max="3600" step="1" value="600" />
+        <div class="row">
+          <button id="rotateOwnerTokenBtn" type="button">Rotate Owner Token</button>
+          <button id="rotateBothTokensBtn" type="button">Rotate Owner + Bootstrap</button>
+          <button id="rotateBootstrapTokenBtn" type="button">Rotate Bootstrap Token</button>
+        </div>
+        <label for="rotatedTokenBox">Latest Rotation Payload</label>
+        <textarea id="rotatedTokenBox" rows="4" placeholder="No token rotation yet." readonly></textarea>
       </section>
 
       <section class="panel full-span">

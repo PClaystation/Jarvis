@@ -91,6 +91,7 @@ func Capabilities() []string {
 		"power_control",
 		"session_control",
 		"updater",
+		"privileged_helper_split",
 		"admin_ops",
 		"admin_exec",
 		"process_control",

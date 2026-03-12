@@ -146,6 +146,15 @@ export class QueuedUpdateDispatcher {
         continue;
       }
 
+      if (queuedUpdate.use_privileged_helper && !liveConnection.capabilities.includes("privileged_helper_split")) {
+        this.failQueuedUpdate(
+          queuedUpdate,
+          `${deviceId} does not support privileged helper split`,
+          "PRIVILEGED_HELPER_NOT_SUPPORTED",
+        );
+        continue;
+      }
+
       const completed = await this.dispatchQueuedUpdate(queuedUpdate);
       if (!completed) {
         return;
@@ -164,6 +173,9 @@ export class QueuedUpdateDispatcher {
         url: queuedUpdate.package_url,
         sha256: queuedUpdate.sha256,
         ...(queuedUpdate.size_bytes ? { size_bytes: queuedUpdate.size_bytes } : {}),
+        ...(queuedUpdate.signature ? { signature: queuedUpdate.signature } : {}),
+        ...(queuedUpdate.signature_key_id ? { signature_key_id: queuedUpdate.signature_key_id } : {}),
+        ...(queuedUpdate.use_privileged_helper ? { use_privileged_helper: true } : {}),
         ...(designationChange ? { next_device_id: designationChange.nextDeviceId } : {}),
       },
     };

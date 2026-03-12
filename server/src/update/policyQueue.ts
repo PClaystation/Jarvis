@@ -22,6 +22,9 @@ export function queuePolicyUpdate(input: QueuePolicyUpdateInput): QueuePolicyUpd
   const packageUrl = input.policy.package_url?.trim() ?? "";
   const sha256 = input.policy.sha256?.trim().toLowerCase() ?? "";
   const sizeBytes = input.policy.size_bytes ?? null;
+  const signature = input.policy.signature?.trim() || null;
+  const signatureKeyId = input.policy.signature_key_id?.trim() || null;
+  const usePrivilegedHelper = input.policy.use_privileged_helper === true;
 
   if (!version || !packageUrl || !sha256) {
     return {
@@ -37,7 +40,10 @@ export function queuePolicyUpdate(input: QueuePolicyUpdateInput): QueuePolicyUpd
         item.version === version &&
         item.package_url === packageUrl &&
         item.sha256.toLowerCase() === sha256 &&
-        item.size_bytes === sizeBytes,
+        item.size_bytes === sizeBytes &&
+        (item.signature ?? null) === signature &&
+        (item.signature_key_id ?? null) === signatureKeyId &&
+        item.use_privileged_helper === usePrivilegedHelper,
     );
 
   if (alreadyQueued) {
@@ -64,6 +70,9 @@ export function queuePolicyUpdate(input: QueuePolicyUpdateInput): QueuePolicyUpd
       url: packageUrl,
       sha256,
       ...(sizeBytes ? { size_bytes: sizeBytes } : {}),
+      ...(signature ? { signature } : {}),
+      ...(signatureKeyId ? { signature_key_id: signatureKeyId } : {}),
+      ...(usePrivilegedHelper ? { use_privileged_helper: true } : {}),
     }),
     status: "queued",
     resultMessage: null,
@@ -81,6 +90,9 @@ export function queuePolicyUpdate(input: QueuePolicyUpdateInput): QueuePolicyUpd
     packageUrl,
     sha256,
     sizeBytes,
+    signature,
+    signatureKeyId,
+    usePrivilegedHelper,
   });
 
   return {

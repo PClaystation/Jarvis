@@ -16,7 +16,12 @@ Phone-driven mycelium command platform:
 - `GET /api/health`
 - `POST /api/enroll` for first-run device enrollment
 - `GET /api/devices` (phone-authenticated)
+- `GET /api/devices/:deviceId` rich per-device state (control flags, aliases, queued updates, recent logs)
 - Remote-managed per-device app aliases (`GET/PUT /api/devices/:deviceId/app-aliases`)
+- `GET /api/admin/overview` aggregated security/update/device visibility
+- Auth lifecycle endpoints:
+  - `POST /api/auth/keys/:keyId/rotate` (replacement key + revoke old key)
+  - `POST /api/auth/tokens/rotate` (owner/bootstrap rotation with owner-token grace window)
 - PWA routes: `/app`, `/app.js`, `/app.css`, `/manifest.webmanifest`, `/sw.js`
 - Agent WebSocket auth handshake + heartbeat
 - Presence tracking (`online`/`offline` + `last_seen`)
@@ -24,6 +29,7 @@ Phone-driven mycelium command platform:
 - WebSocket auth timeout + ping keepalive + max-message-size guard
 - Router backpressure + per-device command serialization
 - Server-side package hash inspection (if `sha256` omitted on update requests)
+- Optional/required detached signature verification for update payload metadata
 - SQLite `devices` + `command_logs`
 - Go agent with startup registration attempt (Windows task scheduler)
 - Allowlisted agent actions:
@@ -149,6 +155,7 @@ Notes:
   - `UPDATE_METADATA_TIMEOUT_MS`
   - `UPDATE_MAX_PACKAGE_BYTES`
   - `ENFORCE_HTTPS_UPDATE_URL`
+  - `UPDATE_REQUIRE_SIGNATURE` + `UPDATE_SIGNING_KEYS` (phase 2 signed-package hardening)
   - `ALLOW_AUTOMATIC_UPDATES` (default `false`; keeps update policy queueing/manual updates under operator control)
   - `CORS_ALLOWED_ORIGINS` (comma-separated explicit origins; defaults already include `https://pclaystation.github.io` and `https://mpmc.ddns.net`)
 5. Install and run:
@@ -436,6 +443,8 @@ curl -X POST http://localhost:8080/api/update \
 Notes:
 
 - `sha256` is optional. If omitted, server downloads once and computes it before dispatch.
+- `signature` + `signature_key_id` are optional unless `UPDATE_REQUIRE_SIGNATURE=true`, in which case both are required and verified server-side.
+- `use_privileged_helper` is optional and only dispatches to agents advertising `privileged_helper_split`.
 - Agent still verifies `sha256` locally before replacing itself.
 - `queue_if_offline` is only valid when `target` is a single device ID (not `all`).
 
@@ -449,6 +458,8 @@ Notes:
    - version (for example `0.2.0`)
    - package URL (`https://.../cordyceps-agent-0.2.0.exe`)
    - optional SHA256 (leave blank to auto-inspect on server)
+   - optional signature key ID + detached signature (required if signature hardening is enabled)
+   - optional privileged helper toggle (for agents that advertise `privileged_helper_split`)
    - optional queue toggle for offline single-target updates
 5. Tap `Push Update`.
 
@@ -465,6 +476,7 @@ Default behavior:
 - strict allowlisted command parsing
 - no arbitrary shell/PowerShell from phone text
 - remote update requires HTTPS URL (default) + SHA256 verification on agent
+- optional/required detached signature verification on server prior to dispatch
 - normal user context for main agent
 
 ## Automation (Self-Maintaining Colony)
@@ -482,7 +494,7 @@ Configuration details (required variables/secrets, branch protection recommendat
 
 - [docs/automation.md](docs/automation.md)
 
-## Next Mutations / Milestones
+## Recent Mutations / Completed Milestones
 
 - signed package verification (phase 2 hardening)
 - optional privileged helper split

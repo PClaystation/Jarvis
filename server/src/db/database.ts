@@ -67,6 +67,9 @@ export interface QueuedUpdateInsert {
   packageUrl: string;
   sha256: string;
   sizeBytes: number | null;
+  signature?: string | null;
+  signatureKeyId?: string | null;
+  usePrivilegedHelper?: boolean;
 }
 
 export interface QueuedUpdateRecord {
@@ -80,6 +83,9 @@ export interface QueuedUpdateRecord {
   package_url: string;
   sha256: string;
   size_bytes: number | null;
+  signature: string | null;
+  signature_key_id: string | null;
+  use_privileged_helper: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -129,6 +135,9 @@ export interface UpdatePolicyRecord {
   package_url: string | null;
   sha256: string | null;
   size_bytes: number | null;
+  signature: string | null;
+  signature_key_id: string | null;
+  use_privileged_helper: boolean;
   revoked_versions: string[];
   strict_mode: boolean;
   auto_update: boolean;
@@ -256,6 +265,9 @@ export class Database {
         package_url TEXT NOT NULL,
         sha256 TEXT NOT NULL,
         size_bytes INTEGER,
+        signature TEXT,
+        signature_key_id TEXT,
+        use_privileged_helper INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
@@ -314,6 +326,9 @@ export class Database {
         package_url TEXT,
         sha256 TEXT,
         size_bytes INTEGER,
+        signature TEXT,
+        signature_key_id TEXT,
+        use_privileged_helper INTEGER NOT NULL DEFAULT 0,
         revoked_versions_json TEXT NOT NULL DEFAULT '[]',
         strict_mode INTEGER NOT NULL DEFAULT 0,
         auto_update INTEGER NOT NULL DEFAULT 0,
@@ -334,6 +349,12 @@ export class Database {
     `);
 
     this.ensureColumn("command_logs", "result_json", "TEXT");
+    this.ensureColumn("queued_updates", "signature", "TEXT");
+    this.ensureColumn("queued_updates", "signature_key_id", "TEXT");
+    this.ensureColumn("queued_updates", "use_privileged_helper", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("update_policies", "signature", "TEXT");
+    this.ensureColumn("update_policies", "signature_key_id", "TEXT");
+    this.ensureColumn("update_policies", "use_privileged_helper", "INTEGER NOT NULL DEFAULT 0");
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -842,6 +863,9 @@ export class Database {
             package_url,
             sha256,
             size_bytes,
+            signature,
+            signature_key_id,
+            use_privileged_helper,
             created_at,
             updated_at
           ) VALUES (
@@ -855,6 +879,9 @@ export class Database {
             @package_url,
             @sha256,
             @size_bytes,
+            @signature,
+            @signature_key_id,
+            @use_privileged_helper,
             @created_at,
             @updated_at
           )
@@ -866,6 +893,9 @@ export class Database {
             package_url = excluded.package_url,
             sha256 = excluded.sha256,
             size_bytes = excluded.size_bytes,
+            signature = excluded.signature,
+            signature_key_id = excluded.signature_key_id,
+            use_privileged_helper = excluded.use_privileged_helper,
             updated_at = excluded.updated_at
         `,
       )
@@ -880,6 +910,9 @@ export class Database {
         package_url: input.packageUrl,
         sha256: input.sha256,
         size_bytes: input.sizeBytes,
+        signature: input.signature ?? null,
+        signature_key_id: input.signatureKeyId ?? null,
+        use_privileged_helper: input.usePrivilegedHelper ? 1 : 0,
         created_at: now,
         updated_at: now,
       });
@@ -900,6 +933,9 @@ export class Database {
             package_url,
             sha256,
             size_bytes,
+            signature,
+            signature_key_id,
+            use_privileged_helper,
             created_at,
             updated_at
           FROM queued_updates
@@ -918,6 +954,9 @@ export class Database {
       package_url: string;
       sha256: string;
       size_bytes: number | null;
+      signature: string | null;
+      signature_key_id: string | null;
+      use_privileged_helper: number | string;
       created_at: string;
       updated_at: string;
     }>;
@@ -933,6 +972,9 @@ export class Database {
       package_url: row.package_url,
       sha256: row.sha256,
       size_bytes: row.size_bytes,
+      signature: row.signature,
+      signature_key_id: row.signature_key_id,
+      use_privileged_helper: parseSqliteBool(row.use_privileged_helper),
       created_at: row.created_at,
       updated_at: row.updated_at,
     }));
@@ -1442,6 +1484,28 @@ export class Database {
     };
   }
 
+  public listDeviceControls(): DeviceControlRecord[] {
+    const rows = this.db
+      .prepare(
+        "SELECT device_id, quarantine_enabled, kill_switch_enabled, reason, updated_at FROM device_controls ORDER BY device_id ASC",
+      )
+      .all() as Array<{
+      device_id: string;
+      quarantine_enabled: number | string;
+      kill_switch_enabled: number | string;
+      reason: string | null;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      device_id: row.device_id,
+      quarantine_enabled: parseSqliteBool(row.quarantine_enabled),
+      kill_switch_enabled: parseSqliteBool(row.kill_switch_enabled),
+      reason: row.reason,
+      updated_at: row.updated_at,
+    }));
+  }
+
   public upsertDeviceControl(input: {
     deviceId: string;
     quarantineEnabled: boolean;
@@ -1493,6 +1557,9 @@ export class Database {
             package_url,
             sha256,
             size_bytes,
+            signature,
+            signature_key_id,
+            use_privileged_helper,
             revoked_versions_json,
             strict_mode,
             auto_update,
@@ -1508,6 +1575,9 @@ export class Database {
           package_url: string | null;
           sha256: string | null;
           size_bytes: number | null;
+          signature: string | null;
+          signature_key_id: string | null;
+          use_privileged_helper: number | string;
           revoked_versions_json: string | null;
           strict_mode: number | string;
           auto_update: number | string;
@@ -1522,6 +1592,9 @@ export class Database {
         package_url: null,
         sha256: null,
         size_bytes: null,
+        signature: null,
+        signature_key_id: null,
+        use_privileged_helper: false,
         revoked_versions: [],
         strict_mode: false,
         auto_update: false,
@@ -1535,6 +1608,9 @@ export class Database {
       package_url: row.package_url,
       sha256: row.sha256,
       size_bytes: row.size_bytes,
+      signature: row.signature,
+      signature_key_id: row.signature_key_id,
+      use_privileged_helper: parseSqliteBool(row.use_privileged_helper),
       revoked_versions: parseJsonArray(row.revoked_versions_json),
       strict_mode: parseSqliteBool(row.strict_mode),
       auto_update: parseSqliteBool(row.auto_update),
@@ -1547,6 +1623,9 @@ export class Database {
     packageUrl: string | null;
     sha256: string | null;
     sizeBytes: number | null;
+    signature: string | null;
+    signatureKeyId: string | null;
+    usePrivilegedHelper: boolean;
     revokedVersions: string[];
     strictMode: boolean;
     autoUpdate: boolean;
@@ -1561,6 +1640,9 @@ export class Database {
             package_url,
             sha256,
             size_bytes,
+            signature,
+            signature_key_id,
+            use_privileged_helper,
             revoked_versions_json,
             strict_mode,
             auto_update,
@@ -1571,6 +1653,9 @@ export class Database {
             @package_url,
             @sha256,
             @size_bytes,
+            @signature,
+            @signature_key_id,
+            @use_privileged_helper,
             @revoked_versions_json,
             @strict_mode,
             @auto_update,
@@ -1581,6 +1666,9 @@ export class Database {
             package_url = excluded.package_url,
             sha256 = excluded.sha256,
             size_bytes = excluded.size_bytes,
+            signature = excluded.signature,
+            signature_key_id = excluded.signature_key_id,
+            use_privileged_helper = excluded.use_privileged_helper,
             revoked_versions_json = excluded.revoked_versions_json,
             strict_mode = excluded.strict_mode,
             auto_update = excluded.auto_update,
@@ -1592,6 +1680,9 @@ export class Database {
         package_url: input.packageUrl,
         sha256: input.sha256,
         size_bytes: input.sizeBytes,
+        signature: input.signature,
+        signature_key_id: input.signatureKeyId,
+        use_privileged_helper: input.usePrivilegedHelper ? 1 : 0,
         revoked_versions_json: JSON.stringify(input.revokedVersions),
         strict_mode: input.strictMode ? 1 : 0,
         auto_update: input.autoUpdate ? 1 : 0,

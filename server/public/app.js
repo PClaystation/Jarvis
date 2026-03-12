@@ -37,6 +37,9 @@ const updateVersionInput = document.getElementById("updateVersionInput");
 const updateUrlInput = document.getElementById("updateUrlInput");
 const updateShaInput = document.getElementById("updateShaInput");
 const updateSizeInput = document.getElementById("updateSizeInput");
+const updateSignatureKeyIdInput = document.getElementById("updateSignatureKeyIdInput");
+const updateSignatureInput = document.getElementById("updateSignatureInput");
+const updateUsePrivilegedHelperInput = document.getElementById("updateUsePrivilegedHelperInput");
 const updateQueueOfflineInput = document.getElementById("updateQueueOfflineInput");
 const pushUpdateBtn = document.getElementById("pushUpdateBtn");
 const adminTargetInput = document.getElementById("adminTargetInput");
@@ -73,6 +76,11 @@ const createApiKeyBtn = document.getElementById("createApiKeyBtn");
 const loadApiKeysBtn = document.getElementById("loadApiKeysBtn");
 const newApiKeyBox = document.getElementById("newApiKeyBox");
 const apiKeyList = document.getElementById("apiKeyList");
+const ownerGraceSecondsInput = document.getElementById("ownerGraceSecondsInput");
+const rotateOwnerTokenBtn = document.getElementById("rotateOwnerTokenBtn");
+const rotateBothTokensBtn = document.getElementById("rotateBothTokensBtn");
+const rotateBootstrapTokenBtn = document.getElementById("rotateBootstrapTokenBtn");
+const rotatedTokenBox = document.getElementById("rotatedTokenBox");
 
 const TOKEN_KEY = "cordyceps_phone_api_token";
 const TARGET_KEY = "cordyceps_last_target";
@@ -82,12 +90,16 @@ const UPDATE_VERSION_KEY = "cordyceps_update_version";
 const UPDATE_URL_KEY = "cordyceps_update_url";
 const UPDATE_SHA_KEY = "cordyceps_update_sha";
 const UPDATE_SIZE_KEY = "cordyceps_update_size";
+const UPDATE_SIGNATURE_KEY_ID_KEY = "cordyceps_update_signature_key_id";
+const UPDATE_SIGNATURE_KEY = "cordyceps_update_signature";
+const UPDATE_USE_PRIV_HELPER_KEY = "cordyceps_update_use_privileged_helper";
 const UPDATE_QUEUE_OFFLINE_KEY = "cordyceps_update_queue_offline";
 const ADMIN_TARGET_KEY = "cordyceps_admin_target";
 const ADMIN_SHELL_KEY = "cordyceps_admin_shell";
 const SECURITY_DEVICE_KEY = "cordyceps_security_device";
 const SECURITY_REASON_KEY = "cordyceps_security_reason";
 const SECURITY_LOCKDOWN_MINUTES_KEY = "cordyceps_security_lockdown_minutes";
+const OWNER_TOKEN_GRACE_SECONDS_KEY = "cordyceps_owner_token_grace_seconds";
 const LAST_COMMAND_SUCCESS_KEY = "cordyceps_last_command_success";
 const BOOTSTRAP_COMMAND_KEY = "cordyceps_bootstrap_command";
 const BOOTSTRAP_ACTION_KEY = "cordyceps_bootstrap_action";
@@ -539,6 +551,20 @@ function parseLockdownMinutes(value) {
 
   const parsed = Number.parseInt(trimmed, 10);
   if (!Number.isInteger(parsed) || parsed < LOCKDOWN_MINUTES_MIN || parsed > LOCKDOWN_MINUTES_MAX) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function parseOwnerTokenGraceSeconds(value) {
+  const trimmed = (value || "").toString().trim();
+  if (!trimmed) {
+    return 600;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3600) {
     return null;
   }
 
@@ -1263,6 +1289,23 @@ function renderApiKeys(keys) {
     article.appendChild(footer);
 
     if (key.status === "active") {
+      const rotate = document.createElement("button");
+      rotate.type = "button";
+      rotate.textContent = "Rotate";
+      rotate.addEventListener("click", async () => {
+        try {
+          rotate.disabled = true;
+          rotate.textContent = "Rotating...";
+          await rotateApiKey(key.key_id);
+        } catch (error) {
+          setResult(error instanceof Error ? error.message : String(error), { isError: true });
+        } finally {
+          rotate.disabled = false;
+          rotate.textContent = "Rotate";
+        }
+      });
+      article.appendChild(rotate);
+
       const revoke = document.createElement("button");
       revoke.type = "button";
       revoke.textContent = "Revoke";
@@ -1512,6 +1555,64 @@ async function createApiKey() {
   setResult(data, { latencyMs });
 }
 
+async function rotateApiKey(keyId) {
+  const trimmedKeyId = (keyId || "").trim();
+  if (!trimmedKeyId) {
+    throw new Error("API key ID is required.");
+  }
+
+  const { data, latencyMs } = await apiRequest(`/api/auth/keys/${encodeURIComponent(trimmedKeyId)}/rotate`, {}, { method: "POST" });
+  if (newApiKeyBox) {
+    newApiKeyBox.value = data.api_key || "";
+  }
+
+  await loadApiKeys({ silent: true });
+  setResult(data, { latencyMs });
+}
+
+async function rotateTokens(options = {}) {
+  const rotateOwner = options.rotateOwner !== false;
+  const rotateBootstrap = options.rotateBootstrap === true;
+  const graceSeconds = parseOwnerTokenGraceSeconds(ownerGraceSecondsInput ? ownerGraceSecondsInput.value : "");
+
+  if (rotateOwner && graceSeconds == null) {
+    throw new Error("Owner grace seconds must be an integer between 0 and 3600.");
+  }
+
+  if (ownerGraceSecondsInput && graceSeconds != null) {
+    ownerGraceSecondsInput.value = String(graceSeconds);
+    localStorage.setItem(OWNER_TOKEN_GRACE_SECONDS_KEY, String(graceSeconds));
+  }
+
+  const payload = {
+    rotate_owner_token: rotateOwner,
+    rotate_bootstrap_token: rotateBootstrap,
+    ...(rotateOwner && graceSeconds != null ? { owner_grace_seconds: graceSeconds } : {}),
+  };
+
+  const { data, latencyMs } = await apiRequest("/api/auth/tokens/rotate", payload, { method: "POST" });
+  if (rotateOwner && data && data.owner_token) {
+    setToken(String(data.owner_token));
+    if (tokenInput) {
+      tokenInput.value = String(data.owner_token);
+    }
+  }
+
+  if (rotatedTokenBox) {
+    rotatedTokenBox.value = JSON.stringify(data, null, 2);
+  }
+
+  if (data && data.previous_owner_token_valid_until) {
+    setAuthHint(`Owner token rotated. Previous token valid until ${toLocalTimestamp(data.previous_owner_token_valid_until)}.`);
+  } else {
+    setAuthHint("Token rotation completed.");
+  }
+
+  setResult(data, { latencyMs });
+  schedulePolling();
+  connectEventStream();
+}
+
 async function applySecurityControl(options = {}) {
   if (!securityDeviceInput || !securityReasonInput || !securityLockdownMinutesInput) {
     throw new Error("Security controls are not available in this app build.");
@@ -1580,6 +1681,9 @@ function persistUpdateSettings() {
     !updateUrlInput ||
     !updateShaInput ||
     !updateSizeInput ||
+    !updateSignatureKeyIdInput ||
+    !updateSignatureInput ||
+    !updateUsePrivilegedHelperInput ||
     !updateQueueOfflineInput
   ) {
     return;
@@ -1590,6 +1694,9 @@ function persistUpdateSettings() {
   localStorage.setItem(UPDATE_URL_KEY, (updateUrlInput.value || "").trim());
   localStorage.setItem(UPDATE_SHA_KEY, normalizeActionText(updateShaInput.value));
   localStorage.setItem(UPDATE_SIZE_KEY, (updateSizeInput.value || "").trim());
+  localStorage.setItem(UPDATE_SIGNATURE_KEY_ID_KEY, normalizeActionText(updateSignatureKeyIdInput.value));
+  localStorage.setItem(UPDATE_SIGNATURE_KEY, (updateSignatureInput.value || "").trim());
+  localStorage.setItem(UPDATE_USE_PRIV_HELPER_KEY, updateUsePrivilegedHelperInput.checked ? "1" : "0");
   localStorage.setItem(UPDATE_QUEUE_OFFLINE_KEY, updateQueueOfflineInput.checked ? "1" : "0");
 }
 
@@ -1600,6 +1707,9 @@ async function pushUpdate() {
     !updateUrlInput ||
     !updateShaInput ||
     !updateSizeInput ||
+    !updateSignatureKeyIdInput ||
+    !updateSignatureInput ||
+    !updateUsePrivilegedHelperInput ||
     !updateQueueOfflineInput
   ) {
     throw new Error("Update controls are not available in this app build.");
@@ -1610,6 +1720,9 @@ async function pushUpdate() {
   const packageUrl = (updateUrlInput.value || "").trim();
   const sha256 = normalizeActionText(updateShaInput.value);
   const sizeRaw = (updateSizeInput.value || "").trim();
+  const signatureKeyId = normalizeActionText(updateSignatureKeyIdInput.value);
+  const signature = (updateSignatureInput.value || "").trim().replace(/\s+/g, "");
+  const usePrivilegedHelper = updateUsePrivilegedHelperInput.checked;
   const queueIfOffline = updateQueueOfflineInput.checked && target !== "all";
 
   if (!target) {
@@ -1637,6 +1750,18 @@ async function pushUpdate() {
     throw new Error("SHA256 must be a 64-character hex string.");
   }
 
+  if (signature && signature.length > 1024) {
+    throw new Error("Signature must be at most 1024 characters.");
+  }
+
+  if (signatureKeyId && !/^[a-z0-9._-]{1,40}$/.test(signatureKeyId)) {
+    throw new Error("Signature key ID must match [a-z0-9._-] and be at most 40 chars.");
+  }
+
+  if (signatureKeyId && !signature) {
+    throw new Error("Signature key ID requires a signature value.");
+  }
+
   let sizeBytes;
   if (sizeRaw) {
     const parsedSize = Number.parseInt(sizeRaw, 10);
@@ -1658,6 +1783,9 @@ async function pushUpdate() {
     queue_if_offline: queueIfOffline,
     ...(sha256 ? { sha256 } : {}),
     ...(sizeBytes ? { size_bytes: sizeBytes } : {}),
+    ...(signature ? { signature } : {}),
+    ...(signatureKeyId ? { signature_key_id: signatureKeyId } : {}),
+    ...(usePrivilegedHelper ? { use_privileged_helper: true } : {}),
   };
 
   const { data, latencyMs } = await apiRequest("/api/update", payload);
@@ -1965,6 +2093,9 @@ function applyBootstrapLink() {
   const updateUrl = read("update_url");
   const updateSha = read("update_sha");
   const updateSize = read("update_size");
+  const updateSignatureKeyId = read("update_signature_key_id");
+  const updateSignature = read("update_signature");
+  const updateUsePrivilegedHelper = read("update_use_privileged_helper");
   const updateQueueOffline = read("update_queue_offline");
 
   let applied = false;
@@ -2008,6 +2139,23 @@ function applyBootstrapLink() {
 
   if (updateSize) {
     localStorage.setItem(UPDATE_SIZE_KEY, updateSize.trim());
+    applied = true;
+  }
+
+  if (updateSignatureKeyId) {
+    localStorage.setItem(UPDATE_SIGNATURE_KEY_ID_KEY, normalizeActionText(updateSignatureKeyId));
+    applied = true;
+  }
+
+  if (updateSignature) {
+    localStorage.setItem(UPDATE_SIGNATURE_KEY, updateSignature.trim());
+    applied = true;
+  }
+
+  if (updateUsePrivilegedHelper) {
+    const normalized = updateUsePrivilegedHelper.trim().toLowerCase();
+    const enabled = normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+    localStorage.setItem(UPDATE_USE_PRIV_HELPER_KEY, enabled ? "1" : "0");
     applied = true;
   }
 
@@ -2058,12 +2206,25 @@ function init() {
     targetInput.value = lastTarget;
   }
 
-  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput && updateQueueOfflineInput) {
+  if (
+    updateTargetInput &&
+    updateVersionInput &&
+    updateUrlInput &&
+    updateShaInput &&
+    updateSizeInput &&
+    updateSignatureKeyIdInput &&
+    updateSignatureInput &&
+    updateUsePrivilegedHelperInput &&
+    updateQueueOfflineInput
+  ) {
     updateTargetInput.value = localStorage.getItem(UPDATE_TARGET_KEY) || targetInput.value || "m1";
     updateVersionInput.value = localStorage.getItem(UPDATE_VERSION_KEY) || "";
     updateUrlInput.value = localStorage.getItem(UPDATE_URL_KEY) || "";
     updateShaInput.value = localStorage.getItem(UPDATE_SHA_KEY) || "";
     updateSizeInput.value = localStorage.getItem(UPDATE_SIZE_KEY) || "";
+    updateSignatureKeyIdInput.value = localStorage.getItem(UPDATE_SIGNATURE_KEY_ID_KEY) || "";
+    updateSignatureInput.value = localStorage.getItem(UPDATE_SIGNATURE_KEY) || "";
+    updateUsePrivilegedHelperInput.checked = localStorage.getItem(UPDATE_USE_PRIV_HELPER_KEY) === "1";
     updateQueueOfflineInput.checked = localStorage.getItem(UPDATE_QUEUE_OFFLINE_KEY) !== "0";
   }
 
@@ -2082,6 +2243,10 @@ function init() {
     securityReasonInput.value = localStorage.getItem(SECURITY_REASON_KEY) || "";
     securityLockdownMinutesInput.value = localStorage.getItem(SECURITY_LOCKDOWN_MINUTES_KEY) || String(LOCKDOWN_MINUTES_DEFAULT);
     setSecurityControlsBusy(false, "");
+  }
+
+  if (ownerGraceSecondsInput) {
+    ownerGraceSecondsInput.value = localStorage.getItem(OWNER_TOKEN_GRACE_SECONDS_KEY) || "600";
   }
 
   renderActionOptions("");
@@ -2351,7 +2516,84 @@ function init() {
     });
   }
 
-  if (updateTargetInput && updateVersionInput && updateUrlInput && updateShaInput && updateSizeInput && updateQueueOfflineInput) {
+  if (ownerGraceSecondsInput) {
+    ownerGraceSecondsInput.addEventListener("change", () => {
+      const parsed = parseOwnerTokenGraceSeconds(ownerGraceSecondsInput.value);
+      if (parsed == null) {
+        ownerGraceSecondsInput.value = localStorage.getItem(OWNER_TOKEN_GRACE_SECONDS_KEY) || "600";
+        return;
+      }
+
+      ownerGraceSecondsInput.value = String(parsed);
+      localStorage.setItem(OWNER_TOKEN_GRACE_SECONDS_KEY, String(parsed));
+    });
+  }
+
+  if (rotateOwnerTokenBtn) {
+    rotateOwnerTokenBtn.addEventListener("click", async () => {
+      try {
+        rotateOwnerTokenBtn.disabled = true;
+        rotateOwnerTokenBtn.textContent = "Rotating...";
+        await rotateTokens({
+          rotateOwner: true,
+          rotateBootstrap: false,
+        });
+      } catch (error) {
+        setResult(error instanceof Error ? error.message : String(error), { isError: true });
+      } finally {
+        rotateOwnerTokenBtn.disabled = false;
+        rotateOwnerTokenBtn.textContent = "Rotate Owner Token";
+      }
+    });
+  }
+
+  if (rotateBothTokensBtn) {
+    rotateBothTokensBtn.addEventListener("click", async () => {
+      try {
+        rotateBothTokensBtn.disabled = true;
+        rotateBothTokensBtn.textContent = "Rotating...";
+        await rotateTokens({
+          rotateOwner: true,
+          rotateBootstrap: true,
+        });
+      } catch (error) {
+        setResult(error instanceof Error ? error.message : String(error), { isError: true });
+      } finally {
+        rotateBothTokensBtn.disabled = false;
+        rotateBothTokensBtn.textContent = "Rotate Owner + Bootstrap";
+      }
+    });
+  }
+
+  if (rotateBootstrapTokenBtn) {
+    rotateBootstrapTokenBtn.addEventListener("click", async () => {
+      try {
+        rotateBootstrapTokenBtn.disabled = true;
+        rotateBootstrapTokenBtn.textContent = "Rotating...";
+        await rotateTokens({
+          rotateOwner: false,
+          rotateBootstrap: true,
+        });
+      } catch (error) {
+        setResult(error instanceof Error ? error.message : String(error), { isError: true });
+      } finally {
+        rotateBootstrapTokenBtn.disabled = false;
+        rotateBootstrapTokenBtn.textContent = "Rotate Bootstrap Token";
+      }
+    });
+  }
+
+  if (
+    updateTargetInput &&
+    updateVersionInput &&
+    updateUrlInput &&
+    updateShaInput &&
+    updateSizeInput &&
+    updateSignatureKeyIdInput &&
+    updateSignatureInput &&
+    updateUsePrivilegedHelperInput &&
+    updateQueueOfflineInput
+  ) {
     updateTargetInput.addEventListener("change", () => {
       persistUpdateSettings();
     });
@@ -2365,6 +2607,15 @@ function init() {
       persistUpdateSettings();
     });
     updateSizeInput.addEventListener("change", () => {
+      persistUpdateSettings();
+    });
+    updateSignatureKeyIdInput.addEventListener("change", () => {
+      persistUpdateSettings();
+    });
+    updateSignatureInput.addEventListener("change", () => {
+      persistUpdateSettings();
+    });
+    updateUsePrivilegedHelperInput.addEventListener("change", () => {
       persistUpdateSettings();
     });
     updateQueueOfflineInput.addEventListener("change", () => {

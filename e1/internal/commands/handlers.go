@@ -160,6 +160,7 @@ func Capabilities() []string {
 		"power_control",
 		"session_control",
 		"updater",
+		"privileged_helper_split",
 		"standard_profile_t1",
 		"safe_profile_e1",
 	}

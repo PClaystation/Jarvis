@@ -24,6 +24,7 @@ interface RealtimeDeps {
   wsPingIntervalMs: number;
   wsMaxMessageBytes: number;
   allowAutomaticUpdates: boolean;
+  updateRequireSignature: boolean;
 }
 
 interface WsLike {
@@ -379,7 +380,9 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
             deps.allowAutomaticUpdates &&
             updatePolicy.auto_update &&
             hasManagedPolicyPackage(updatePolicy) &&
-            hello.capabilities.includes("updater");
+            hello.capabilities.includes("updater") &&
+            (!deps.updateRequireSignature || Boolean(updatePolicy.signature)) &&
+            (!updatePolicy.use_privileged_helper || hello.capabilities.includes("privileged_helper_split"));
 
           if (versionGate.requiresUpdate && updatePolicy.strict_mode && !canAutoUpdate) {
             closeQuietly(socket, 4006, versionGate.message ?? "Version blocked by server policy");

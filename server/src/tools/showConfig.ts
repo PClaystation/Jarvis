@@ -57,6 +57,8 @@ const output = {
   update_max_package_bytes: config.updateMaxPackageBytes,
   enforce_https_update_url: config.enforceHttpsUpdateUrl,
   allow_automatic_updates: config.allowAutomaticUpdates,
+  update_require_signature: config.updateRequireSignature,
+  update_signing_key_ids: Object.keys(config.updateSigningKeys),
   pwa_url: publicOrigin ? `${publicOrigin}/app` : null,
   pwa_pairing_url: publicOrigin
     ? `${publicOrigin}/app#${pairingFragment}`

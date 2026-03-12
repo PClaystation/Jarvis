@@ -35,11 +35,12 @@ type Result struct {
 }
 
 type updateRequest struct {
-	Version      string
-	URL          string
-	SHA256       string
-	SizeBytes    int64
-	NextDeviceID string
+	Version             string
+	URL                 string
+	SHA256              string
+	SizeBytes           int64
+	NextDeviceID        string
+	UsePrivilegedHelper bool
 }
 
 type persistedConfig struct {
@@ -108,7 +109,7 @@ func Apply(args map[string]any, executablePath string, cfgPath string) (Result, 
 		return Result{}, fmt.Errorf("create updater helper: %w", err)
 	}
 
-	if err := launchUpdaterScript(scriptPath); err != nil {
+	if err := launchUpdaterScript(scriptPath, request.UsePrivilegedHelper); err != nil {
 		_ = os.Remove(stagePath)
 		_ = os.Remove(scriptPath)
 		return Result{}, fmt.Errorf("launch updater helper: %w", err)
@@ -167,12 +168,18 @@ func parseRequest(args map[string]any) (updateRequest, error) {
 		return updateRequest{}, err
 	}
 
+	usePrivilegedHelper, err := readOptionalBoolArg(args, "use_privileged_helper")
+	if err != nil {
+		return updateRequest{}, err
+	}
+
 	return updateRequest{
-		Version:      version,
-		URL:          parsedURL.String(),
-		SHA256:       shaValue,
-		SizeBytes:    sizeBytes,
-		NextDeviceID: nextDeviceID,
+		Version:             version,
+		URL:                 parsedURL.String(),
+		SHA256:              shaValue,
+		SizeBytes:           sizeBytes,
+		NextDeviceID:        nextDeviceID,
+		UsePrivilegedHelper: usePrivilegedHelper,
 	}, nil
 }
 
@@ -448,7 +455,30 @@ func leadingLetter(value string) string {
 	return ""
 }
 
-func launchUpdaterScript(scriptPath string) error {
+func launchUpdaterScript(scriptPath string, usePrivilegedHelper bool) error {
+	if usePrivilegedHelper {
+		powershellScript := fmt.Sprintf(
+			"Start-Process -FilePath 'cmd.exe' -ArgumentList '/C \"\"%s\"\"' -Verb RunAs -WindowStyle Hidden",
+			strings.ReplaceAll(scriptPath, "'", "''"),
+		)
+
+		cmd := exec.Command(
+			"powershell",
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy",
+			"Bypass",
+			"-Command",
+			powershellScript,
+		)
+		configureHiddenProcess(cmd)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		_ = cmd.Process.Release()
+		return nil
+	}
+
 	cmd := exec.Command("cmd", "/C", scriptPath)
 	configureHiddenProcess(cmd)
 	if err := cmd.Start(); err != nil {
@@ -549,6 +579,36 @@ func readOptionalSizeArg(args map[string]any, key string) (int64, error) {
 		return typed, nil
 	default:
 		return 0, fmt.Errorf("arg must be a number: %s", key)
+	}
+}
+
+func readOptionalBoolArg(args map[string]any, key string) (bool, error) {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return false, nil
+	}
+
+	switch typed := value.(type) {
+	case bool:
+		return typed, nil
+	case float64:
+		return typed != 0, nil
+	case int:
+		return typed != 0, nil
+	case int64:
+		return typed != 0, nil
+	case string:
+		normalized := strings.ToLower(strings.TrimSpace(typed))
+		switch normalized {
+		case "1", "true", "yes", "on":
+			return true, nil
+		case "0", "false", "no", "off":
+			return false, nil
+		default:
+			return false, fmt.Errorf("arg must be boolean: %s", key)
+		}
+	default:
+		return false, fmt.Errorf("arg must be boolean: %s", key)
 	}
 }
 

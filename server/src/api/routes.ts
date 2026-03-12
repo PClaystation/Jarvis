@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { extractBearerToken, constantTimeEqual } from "../auth/auth";
 import type { AppConfig } from "../config/env";
+import { writeSecretsFile } from "../config/secrets";
 import type { Database, UpdatePolicyRecord } from "../db/database";
 import { EventHub, type RealtimeEvent } from "../events/eventHub";
 import { parseExternalCommand } from "../parser/commandParser";
@@ -18,6 +19,7 @@ import {
   type PreparedDesignationChange,
 } from "../update/designation";
 import { queuePolicyUpdate } from "../update/policyQueue";
+import { verifyUpdateSignature } from "../update/signatureVerifier";
 import { evaluateVersionPolicy, hasManagedPolicyPackage } from "../update/versionPolicy";
 import type { QueuedUpdateDispatcher } from "../update/queuedUpdateDispatcher";
 
@@ -61,6 +63,9 @@ interface UpdateRequestBody {
   package_url?: string;
   sha256?: string;
   size_bytes?: unknown;
+  signature?: unknown;
+  signature_key_id?: unknown;
+  use_privileged_helper?: unknown;
   queue_if_offline?: unknown;
 }
 
@@ -92,6 +97,9 @@ interface UpdatePolicyBody {
   package_url?: unknown;
   sha256?: unknown;
   size_bytes?: unknown;
+  signature?: unknown;
+  signature_key_id?: unknown;
+  use_privileged_helper?: unknown;
 }
 
 interface CreateApiKeyBody {
@@ -112,6 +120,12 @@ interface GroupCommandBody {
   confirm_bulk?: boolean;
 }
 
+interface RotateTokensBody {
+  rotate_owner_token?: unknown;
+  rotate_bootstrap_token?: unknown;
+  owner_grace_seconds?: unknown;
+}
+
 type ApiScope =
   | "devices:read"
   | "devices:write"
@@ -126,6 +140,8 @@ type ApiScope =
 const MAX_TEXT_LEN = 4096;
 const MAX_SOURCE_LEN = 40;
 const MAX_UPDATE_VERSION_LEN = 64;
+const MAX_UPDATE_SIGNATURE_LEN = 1024;
+const MAX_SIGNING_KEY_ID_LEN = 40;
 const MAX_CAPABILITIES = 50;
 const MAX_GROUP_ID_LEN = 32;
 const MAX_GROUP_DISPLAY_NAME_LEN = 80;
@@ -140,11 +156,14 @@ const DEFAULT_HISTORY_LIMIT = 100;
 const MAX_HISTORY_LIMIT = 500;
 const MAX_SSE_TOKEN_LENGTH = 512;
 const SSE_PING_INTERVAL_MS = 20_000;
+const DEFAULT_OWNER_TOKEN_GRACE_SECONDS = 600;
+const MAX_OWNER_TOKEN_GRACE_SECONDS = 3600;
 const JSON_CONTENT_TYPE_RE = /^\s*application\/(?:[a-z0-9.+-]+\+)?json\s*(?:;|$)/i;
 const GROUP_COMMAND_PATH_RE = /^\/api\/groups\/[^/]+\/command$/;
 const GROUP_UPSERT_PATH_RE = /^\/api\/groups\/[^/]+$/;
 const DEVICE_RENAME_PATH_RE = /^\/api\/devices\/[^/]+\/display-name$/;
 const DEVICE_CONTROL_PATH_RE = /^\/api\/devices\/[^/]+\/control$/;
+const API_KEY_ROTATE_PATH_RE = /^\/api\/auth\/keys\/[^/]+\/rotate$/;
 
 interface RateLimitRule {
   id: string;
@@ -291,6 +310,13 @@ const OPEN_APP_CANONICAL_ALLOWLIST = new Set([
   "snippingtool",
 ]);
 
+interface OwnerTokenFallback {
+  token: string;
+  expiresAt: number;
+}
+
+const ownerTokenFallbacks: OwnerTokenFallback[] = [];
+
 function makeLogId(requestId: string, deviceId: string): string {
   return `${requestId}:${deviceId}`;
 }
@@ -324,6 +350,34 @@ function resolveClientIdentity(request: FastifyRequest): string {
   }
 
   return "unknown";
+}
+
+function pruneOwnerTokenFallbacks(now = Date.now()): void {
+  for (let index = ownerTokenFallbacks.length - 1; index >= 0; index -= 1) {
+    if (ownerTokenFallbacks[index].expiresAt <= now) {
+      ownerTokenFallbacks.splice(index, 1);
+    }
+  }
+}
+
+function addOwnerTokenFallback(token: string, graceSeconds: number): string | null {
+  if (!token || graceSeconds <= 0) {
+    return null;
+  }
+
+  pruneOwnerTokenFallbacks();
+  const expiresAt = Date.now() + graceSeconds * 1000;
+  ownerTokenFallbacks.push({ token, expiresAt });
+  if (ownerTokenFallbacks.length > 5) {
+    ownerTokenFallbacks.shift();
+  }
+
+  return new Date(expiresAt).toISOString();
+}
+
+function isValidOwnerTokenFallback(token: string): boolean {
+  pruneOwnerTokenFallbacks();
+  return ownerTokenFallbacks.some((item) => item.expiresAt > Date.now() && constantTimeEqual(token, item.token));
 }
 
 function resolveRateLimitRule(method: string, path: string): RateLimitRule | null {
@@ -391,6 +445,14 @@ function requiresJsonBody(method: string, path: string): boolean {
   }
 
   if (path === "/api/auth/keys") {
+    return true;
+  }
+
+  if (path === "/api/auth/tokens/rotate") {
+    return true;
+  }
+
+  if (API_KEY_ROTATE_PATH_RE.test(path)) {
     return true;
   }
 
@@ -468,7 +530,7 @@ function resolveAuthContext(
     return null;
   }
 
-  if (constantTimeEqual(token, deps.config.phoneApiToken)) {
+  if (constantTimeEqual(token, deps.config.phoneApiToken) || isValidOwnerTokenFallback(token)) {
     return {
       subject: "owner",
       scopes: new Set<ApiScope>(API_SCOPES),
@@ -859,6 +921,81 @@ function parsePackageInspectionFailure(error: unknown): { code: string; message:
   }
 }
 
+function verifyNormalizedUpdateSignature(input: {
+  config: AppConfig;
+  version: string;
+  packageUrl: string;
+  sha256: string;
+  sizeBytes: number | null;
+  signature: string | null;
+  signatureKeyId: string | null;
+}):
+  | {
+      ok: true;
+      signature: string | null;
+      signatureKeyId: string | null;
+      signatureVerified: boolean;
+    }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+      httpStatus: number;
+    } {
+  if (input.signatureKeyId && !input.signature) {
+    return {
+      ok: false,
+      code: "INVALID_UPDATE_SIGNATURE",
+      message: "signature_key_id requires signature",
+      httpStatus: 400,
+    };
+  }
+
+  if (!input.signature) {
+    if (input.config.updateRequireSignature) {
+      return {
+        ok: false,
+        code: "SIGNATURE_REQUIRED",
+        message: "signature is required by server policy",
+        httpStatus: 400,
+      };
+    }
+
+    return {
+      ok: true,
+      signature: null,
+      signatureKeyId: null,
+      signatureVerified: false,
+    };
+  }
+
+  const verified = verifyUpdateSignature({
+    version: input.version,
+    packageUrl: input.packageUrl,
+    sha256: input.sha256,
+    sizeBytes: input.sizeBytes,
+    signature: input.signature,
+    keyId: input.signatureKeyId,
+    keyStore: input.config.updateSigningKeys,
+  });
+
+  if (!verified.ok) {
+    return {
+      ok: false,
+      code: verified.code ?? "UPDATE_SIGNATURE_MISMATCH",
+      message: verified.message ?? "signature verification failed",
+      httpStatus: 400,
+    };
+  }
+
+  return {
+    ok: true,
+    signature: input.signature,
+    signatureKeyId: verified.keyId,
+    signatureVerified: true,
+  };
+}
+
 function asCommandBody(body: unknown): CommandRequestBody {
   if (!body || typeof body !== "object") {
     return {};
@@ -913,6 +1050,14 @@ function asUpdatePolicyBody(body: unknown): UpdatePolicyBody {
   }
 
   return body as UpdatePolicyBody;
+}
+
+function asRotateTokensBody(body: unknown): RotateTokensBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as RotateTokensBody;
 }
 
 function normalizeUpdateTarget(candidate: unknown): string {
@@ -986,6 +1131,36 @@ function normalizeOptionalSizeBytes(value: unknown, maxBytes: number): number | 
   return parsed;
 }
 
+function normalizeOptionalSignature(value: unknown): string | null {
+  const normalized = asTrimmedString(value).replace(/\s+/g, "");
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length > MAX_UPDATE_SIGNATURE_LEN) {
+    return null;
+  }
+
+  if (!/^[A-Za-z0-9+/_=-]+$/.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeOptionalSignatureKeyId(value: unknown): string | null {
+  const normalized = asTrimmedString(value).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length > MAX_SIGNING_KEY_ID_LEN || !/^[a-z0-9._-]+$/.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
 function normalizeOptionalTimeoutMs(value: unknown): number | null {
   if (value === undefined || value === null || value === "") {
     return null;
@@ -1000,6 +1175,24 @@ function normalizeOptionalTimeoutMs(value: unknown): number | null {
   const min = 1_000;
   const max = 15 * 60 * 1_000;
   return Math.max(min, Math.min(max, bounded));
+}
+
+function normalizeOwnerGraceSeconds(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") {
+    return DEFAULT_OWNER_TOKEN_GRACE_SECONDS;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    return null;
+  }
+
+  const bounded = Math.floor(parsed);
+  if (bounded < 0 || bounded > MAX_OWNER_TOKEN_GRACE_SECONDS) {
+    return null;
+  }
+
+  return bounded;
 }
 
 function normalizeBoolean(value: unknown): boolean {
@@ -1038,6 +1231,28 @@ function normalizeOptionalLockdownMinutes(value: unknown): number | null {
 
 function makeUpdateRawText(target: string, version: string, packageUrl: string): string {
   return `${target} update ${version} ${packageUrl}`;
+}
+
+function makeUpdateArgs(input: {
+  version: string;
+  packageUrl: string;
+  sha256: string;
+  sizeBytes: number | null;
+  signature: string | null;
+  signatureKeyId: string | null;
+  usePrivilegedHelper: boolean;
+  nextDeviceId?: string;
+}): Record<string, unknown> {
+  return {
+    version: input.version,
+    url: input.packageUrl,
+    sha256: input.sha256,
+    ...(input.sizeBytes ? { size_bytes: input.sizeBytes } : {}),
+    ...(input.signature ? { signature: input.signature } : {}),
+    ...(input.signatureKeyId ? { signature_key_id: input.signatureKeyId } : {}),
+    ...(input.usePrivilegedHelper ? { use_privileged_helper: true } : {}),
+    ...(input.nextDeviceId ? { next_device_id: input.nextDeviceId } : {}),
+  };
 }
 
 function normalizeOptionalText(value: unknown, maxLength: number): string | undefined {
@@ -1227,6 +1442,40 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     pruneEveryHits: 200,
   });
 
+  const createApiKeyWithRetry = (input: {
+    name: string;
+    scopes: ApiScope[];
+  }): { key: ReturnType<Database["createApiKey"]>; rawToken: string } | null => {
+    const rawToken = randomToken(32);
+    const tokenHash = sha256Hex(rawToken);
+    let created: ReturnType<Database["createApiKey"]> | null = null;
+    let attempts = 0;
+
+    while (!created && attempts < 5) {
+      attempts += 1;
+      const keyId = `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        created = deps.db.createApiKey({
+          keyId,
+          name: input.name,
+          tokenHash,
+          scopes: input.scopes,
+        });
+      } catch {
+        created = null;
+      }
+    }
+
+    if (!created) {
+      return null;
+    }
+
+    return {
+      key: created,
+      rawToken,
+    };
+  };
+
   server.addHook("onRequest", async (request, reply) => {
     reply.header("X-Request-Id", request.id);
 
@@ -1309,6 +1558,55 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     };
   });
 
+  server.get("/api/admin/overview", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["admin:manage"])) {
+      return;
+    }
+
+    const dbStats = deps.db.healthSnapshot();
+    const policy = deps.db.getUpdatePolicy();
+    const controls = deps.db.listDeviceControls();
+    const activeControls = controls.filter((control) => control.quarantine_enabled || control.kill_switch_enabled);
+    const onlineByCapability = new Map<string, number>();
+
+    for (const deviceId of deps.registry.listOnlineDeviceIds()) {
+      const connected = deps.registry.get(deviceId);
+      if (!connected) {
+        continue;
+      }
+
+      for (const capability of connected.capabilities) {
+        onlineByCapability.set(capability, (onlineByCapability.get(capability) ?? 0) + 1);
+      }
+    }
+
+    reply.send({
+      ok: true,
+      ts: new Date().toISOString(),
+      health: {
+        uptime_seconds: Math.floor(process.uptime()),
+        online_connections: deps.registry.countOnline(),
+        pending_commands: deps.router.pendingCount(),
+        devices_total: dbStats.deviceCount,
+        devices_online: dbStats.onlineDeviceCount,
+        command_logs_total: dbStats.commandLogCount,
+        groups_total: dbStats.groupCount,
+        api_keys_total: dbStats.apiKeyCount,
+      },
+      update_policy: {
+        ...policy,
+        auto_update: deps.config.allowAutomaticUpdates ? policy.auto_update : false,
+      },
+      security_controls: {
+        active_count: activeControls.length,
+        quarantined_count: controls.filter((control) => control.quarantine_enabled).length,
+        kill_switch_count: controls.filter((control) => control.kill_switch_enabled).length,
+        devices: activeControls,
+      },
+      online_capabilities: Object.fromEntries([...onlineByCapability.entries()].sort((left, right) => left[0].localeCompare(right[0]))),
+    });
+  });
+
   server.get("/api/auth/scopes", async (request, reply) => {
     const auth = authorize(request, reply, deps, ["admin:manage"]);
     if (!auth) {
@@ -1366,26 +1664,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
-    const rawToken = randomToken(32);
-    const tokenHash = sha256Hex(rawToken);
-    let created = null;
-    let attempts = 0;
-
-    while (!created && attempts < 5) {
-      attempts += 1;
-      const keyId = `k${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-      try {
-        created = deps.db.createApiKey({
-          keyId,
-          name,
-          tokenHash,
-          scopes,
-        });
-      } catch {
-        created = null;
-      }
-    }
-
+    const created = createApiKeyWithRetry({ name, scopes });
     if (!created) {
       reply.code(500).send({
         ok: false,
@@ -1397,8 +1676,8 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
     reply.send({
       ok: true,
-      key: created,
-      api_key: rawToken,
+      key: created.key,
+      api_key: created.rawToken,
     });
   });
 
@@ -1432,6 +1711,169 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     reply.send({
       ok: true,
       message: `Revoked key ${keyId}`,
+    });
+  });
+
+  server.post("/api/auth/keys/:keyId/rotate", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["admin:manage"]);
+    if (!auth) {
+      return;
+    }
+
+    const params = request.params as { keyId?: string } | undefined;
+    const keyId = asTrimmedString(params?.keyId);
+    if (!keyId) {
+      reply.code(400).send({
+        ok: false,
+        message: "key_id is required",
+        error_code: "INVALID_KEY_ID",
+      });
+      return;
+    }
+
+    const current = deps.db.getApiKeyById(keyId);
+    if (!current) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown key: ${keyId}`,
+        error_code: "UNKNOWN_KEY",
+      });
+      return;
+    }
+
+    if (current.status !== "active") {
+      reply.code(409).send({
+        ok: false,
+        message: `Key ${keyId} is not active`,
+        error_code: "KEY_NOT_ACTIVE",
+      });
+      return;
+    }
+
+    const scopes = current.scopes.filter((scope): scope is ApiScope => isValidApiScope(scope));
+    if (!auth.isOwnerToken && scopes.includes("admin:manage")) {
+      forbidden(reply, "Only owner token may rotate admin keys");
+      return;
+    }
+
+    const replacement = createApiKeyWithRetry({
+      name: current.name,
+      scopes,
+    });
+    if (!replacement) {
+      reply.code(500).send({
+        ok: false,
+        message: "Failed to rotate API key",
+        error_code: "API_KEY_ROTATE_FAILED",
+      });
+      return;
+    }
+
+    deps.db.revokeApiKey(keyId);
+
+    reply.send({
+      ok: true,
+      rotated_from: keyId,
+      key: replacement.key,
+      api_key: replacement.rawToken,
+    });
+  });
+
+  server.post("/api/auth/tokens/rotate", async (request, reply) => {
+    const auth = authorize(request, reply, deps, ["admin:manage"]);
+    if (!auth) {
+      return;
+    }
+
+    if (!auth.isOwnerToken) {
+      forbidden(reply, "Only owner token may rotate owner/bootstrap tokens");
+      return;
+    }
+
+    const body = asRotateTokensBody(request.body);
+    const rotateOwner = hasOwnField(body, "rotate_owner_token") ? normalizeBoolean(body.rotate_owner_token) : true;
+    const rotateBootstrap = hasOwnField(body, "rotate_bootstrap_token")
+      ? normalizeBoolean(body.rotate_bootstrap_token)
+      : false;
+
+    if (!rotateOwner && !rotateBootstrap) {
+      reply.code(400).send({
+        ok: false,
+        message: "Set rotate_owner_token and/or rotate_bootstrap_token to true",
+        error_code: "INVALID_ROTATION_REQUEST",
+      });
+      return;
+    }
+
+    const ownerGraceSeconds = rotateOwner
+      ? normalizeOwnerGraceSeconds(body.owner_grace_seconds)
+      : 0;
+    if (rotateOwner && ownerGraceSeconds === null) {
+      reply.code(400).send({
+        ok: false,
+        message: `owner_grace_seconds must be an integer between 0 and ${MAX_OWNER_TOKEN_GRACE_SECONDS}`,
+        error_code: "INVALID_OWNER_GRACE_SECONDS",
+      });
+      return;
+    }
+
+    if (rotateOwner && deps.config.phoneApiTokenSource === "env") {
+      reply.code(409).send({
+        ok: false,
+        message: "Owner token is env-managed and cannot be rotated at runtime",
+        error_code: "OWNER_TOKEN_ENV_MANAGED",
+      });
+      return;
+    }
+
+    if (rotateBootstrap && deps.config.agentBootstrapTokenSource === "env") {
+      reply.code(409).send({
+        ok: false,
+        message: "Bootstrap token is env-managed and cannot be rotated at runtime",
+        error_code: "BOOTSTRAP_TOKEN_ENV_MANAGED",
+      });
+      return;
+    }
+
+    const previousOwnerToken = deps.config.phoneApiToken;
+    const nextOwnerToken = rotateOwner ? randomToken(32) : deps.config.phoneApiToken;
+    const nextBootstrapToken = rotateBootstrap ? randomToken(24) : deps.config.agentBootstrapToken;
+
+    try {
+      writeSecretsFile(deps.config.secretsPath, {
+        phoneApiToken: nextOwnerToken,
+        agentBootstrapToken: nextBootstrapToken,
+      });
+    } catch (error) {
+      reply.code(500).send({
+        ok: false,
+        message: error instanceof Error ? error.message : "Failed to persist rotated tokens",
+        error_code: "TOKEN_ROTATION_PERSIST_FAILED",
+      });
+      return;
+    }
+
+    deps.config.phoneApiToken = nextOwnerToken;
+    deps.config.agentBootstrapToken = nextBootstrapToken;
+    if (rotateOwner) {
+      deps.config.phoneApiTokenSource = "secrets_file";
+    }
+    if (rotateBootstrap) {
+      deps.config.agentBootstrapTokenSource = "secrets_file";
+    }
+
+    const previousOwnerTokenValidUntil = rotateOwner
+      ? addOwnerTokenFallback(previousOwnerToken, ownerGraceSeconds ?? 0)
+      : null;
+
+    reply.send({
+      ok: true,
+      rotated_owner_token: rotateOwner,
+      rotated_bootstrap_token: rotateBootstrap,
+      owner_token: rotateOwner ? nextOwnerToken : null,
+      bootstrap_token: rotateBootstrap ? nextBootstrapToken : null,
+      owner_grace_seconds: rotateOwner ? (ownerGraceSeconds ?? 0) : 0,
+      previous_owner_token_valid_until: previousOwnerTokenValidUntil,
     });
   });
 
@@ -1499,6 +1941,81 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       ok: true,
       devices,
     };
+  });
+
+  server.get("/api/devices/:deviceId", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["devices:read"])) {
+      return;
+    }
+
+    const params = request.params as { deviceId?: string } | undefined;
+    const deviceId = asTrimmedString(params?.deviceId).toLowerCase();
+    if (!deviceId || !/^[a-z0-9_-]{2,32}$/.test(deviceId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "device_id must be 2-32 chars and use a-z, 0-9, _ or -",
+        error_code: "INVALID_DEVICE_ID",
+      });
+      return;
+    }
+
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const recentLogLimit = Math.max(1, Math.min(100, normalizeHistoryLimit(query.logs_limit)));
+    const dbDevice = deps.db.getDevice(deviceId);
+    const connected = deps.registry.get(deviceId);
+    if (!dbDevice && !connected) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown device: ${deviceId}`,
+        error_code: "UNKNOWN_DEVICE",
+      });
+      return;
+    }
+
+    const device = dbDevice ?? {
+      device_id: deviceId,
+      display_name: null,
+      status: connected ? "online" : "offline",
+      last_seen: connected ? new Date(connected.lastSeenAt).toISOString() : "",
+      version: connected?.version ?? null,
+      hostname: connected?.hostname ?? null,
+      username: connected?.username ?? null,
+      capabilities: connected?.capabilities ?? [],
+      created_at: "",
+      updated_at: "",
+    };
+
+    const control = deps.db.getDeviceControl(deviceId);
+    const aliases = deps.db.listDeviceAppAliases(deviceId);
+    const queuedUpdates = deps.db.listQueuedUpdatesForDevice(deviceId);
+    const recentLogs = deps.db.listCommandLogs({
+      limit: recentLogLimit,
+      deviceId,
+    });
+
+    reply.send({
+      ok: true,
+      device: {
+        ...withProfile(device),
+        quarantine_enabled: control.quarantine_enabled,
+        kill_switch_enabled: control.kill_switch_enabled,
+        quarantine_reason: control.reason,
+      },
+      realtime: connected
+        ? {
+            connected: true,
+            connected_at: new Date(connected.connectedAt).toISOString(),
+            last_seen_at: new Date(connected.lastSeenAt).toISOString(),
+          }
+        : {
+            connected: false,
+            connected_at: null,
+            last_seen_at: null,
+          },
+      aliases,
+      queued_updates: queuedUpdates,
+      recent_logs: recentLogs,
+    });
   });
 
   server.post("/api/devices/:deviceId/display-name", async (request, reply) => {
@@ -2461,9 +2978,53 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
+    const hasSignature = hasOwnField(body, "signature");
+    const providedSignature = normalizeOptionalSignature(body.signature);
+    let signature = hasSignature ? providedSignature : current.signature;
+    if (
+      hasSignature &&
+      body.signature !== undefined &&
+      body.signature !== null &&
+      body.signature !== "" &&
+      !providedSignature
+    ) {
+      reply.code(400).send({
+        ok: false,
+        message: "signature must be base64/base64url and at most 1024 chars",
+        error_code: "INVALID_UPDATE_SIGNATURE",
+      });
+      return;
+    }
+
+    const hasSignatureKeyId = hasOwnField(body, "signature_key_id");
+    const providedSignatureKeyId = normalizeOptionalSignatureKeyId(body.signature_key_id);
+    let signatureKeyId = hasSignatureKeyId ? providedSignatureKeyId : current.signature_key_id;
+    if (
+      hasSignatureKeyId &&
+      body.signature_key_id !== undefined &&
+      body.signature_key_id !== null &&
+      body.signature_key_id !== "" &&
+      !providedSignatureKeyId
+    ) {
+      reply.code(400).send({
+        ok: false,
+        message: "signature_key_id must match [a-z0-9._-] and be at most 40 chars",
+        error_code: "INVALID_SIGNATURE_KEY_ID",
+      });
+      return;
+    }
+
+    const hasUsePrivilegedHelper = hasOwnField(body, "use_privileged_helper");
+    let usePrivilegedHelper = hasUsePrivilegedHelper
+      ? normalizeBoolean(body.use_privileged_helper)
+      : current.use_privileged_helper;
+
     if (!packageUrl) {
       sha256 = null;
       sizeBytes = null;
+      signature = null;
+      signatureKeyId = null;
+      usePrivilegedHelper = false;
     }
 
     if (packageUrl && !sha256) {
@@ -2489,6 +3050,30 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         });
         return;
       }
+    }
+
+    if (packageUrl && sha256) {
+      const signatureCheck = verifyNormalizedUpdateSignature({
+        config: deps.config,
+        version: pinnedVersion ?? "",
+        packageUrl,
+        sha256,
+        sizeBytes,
+        signature,
+        signatureKeyId,
+      });
+
+      if (!signatureCheck.ok) {
+        reply.code(signatureCheck.httpStatus).send({
+          ok: false,
+          message: signatureCheck.message,
+          error_code: signatureCheck.code,
+        });
+        return;
+      }
+
+      signature = signatureCheck.signature;
+      signatureKeyId = signatureCheck.signatureKeyId;
     }
 
     const policyActive = Boolean(pinnedVersion) || revokedVersions.length > 0;
@@ -2517,13 +3102,21 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       packageUrl,
       sha256,
       sizeBytes,
+      signature,
+      signatureKeyId,
+      usePrivilegedHelper,
       revokedVersions,
       strictMode,
       autoUpdate,
     });
 
     const queuedUpdates: string[] = [];
-    if (deps.config.allowAutomaticUpdates && saved.auto_update && hasManagedPolicyPackage(saved)) {
+    if (
+      deps.config.allowAutomaticUpdates &&
+      saved.auto_update &&
+      hasManagedPolicyPackage(saved) &&
+      (!deps.config.updateRequireSignature || Boolean(saved.signature))
+    ) {
       for (const deviceId of deps.registry.listOnlineDeviceIds()) {
         const connected = deps.registry.get(deviceId);
         if (!connected) {
@@ -2536,6 +3129,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         }
 
         if (!connected.capabilities.includes("updater")) {
+          continue;
+        }
+
+        if (saved.use_privileged_helper && !connected.capabilities.includes("privileged_helper_split")) {
           continue;
         }
 
@@ -2589,6 +3186,11 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     const version = normalizeUpdateVersion(body.version);
     const packageUrl = normalizeUpdatePackageUrl(body.package_url, deps.config.enforceHttpsUpdateUrl);
     const providedSha256 = normalizeSha256(body.sha256);
+    const providedSignature = normalizeOptionalSignature(body.signature);
+    const providedSignatureKeyId = normalizeOptionalSignatureKeyId(body.signature_key_id);
+    const usePrivilegedHelper = hasOwnField(body, "use_privileged_helper")
+      ? normalizeBoolean(body.use_privileged_helper)
+      : false;
     const queueIfOffline = normalizeBoolean(body.queue_if_offline);
 
     if (!isValidTargetFormat(target)) {
@@ -2653,6 +3255,38 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
+    if (
+      hasOwnField(body, "signature") &&
+      body.signature !== undefined &&
+      body.signature !== null &&
+      body.signature !== "" &&
+      !providedSignature
+    ) {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "signature must be base64/base64url and at most 1024 chars",
+        error_code: "INVALID_UPDATE_SIGNATURE",
+      });
+      return;
+    }
+
+    if (
+      hasOwnField(body, "signature_key_id") &&
+      body.signature_key_id !== undefined &&
+      body.signature_key_id !== null &&
+      body.signature_key_id !== "" &&
+      !providedSignatureKeyId
+    ) {
+      reply.code(400).send({
+        ok: false,
+        request_id: requestId,
+        message: "signature_key_id must match [a-z0-9._-] and be at most 40 chars",
+        error_code: "INVALID_SIGNATURE_KEY_ID",
+      });
+      return;
+    }
+
     const providedSizeBytes = normalizeOptionalSizeBytes(body.size_bytes, deps.config.updateMaxPackageBytes);
     if (body.size_bytes !== undefined && providedSizeBytes === null) {
       reply.code(400).send({
@@ -2695,6 +3329,29 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       }
     }
 
+    const signatureCheck = verifyNormalizedUpdateSignature({
+      config: deps.config,
+      version,
+      packageUrl: resolvedPackageUrl,
+      sha256,
+      sizeBytes: packageSizeBytes,
+      signature: providedSignature,
+      signatureKeyId: providedSignatureKeyId,
+    });
+    if (!signatureCheck.ok) {
+      reply.code(signatureCheck.httpStatus).send({
+        ok: false,
+        request_id: requestId,
+        message: signatureCheck.message,
+        error_code: signatureCheck.code,
+      });
+      return;
+    }
+
+    const signature = signatureCheck.signature;
+    const signatureKeyId = signatureCheck.signatureKeyId;
+    const signatureVerified = signatureCheck.signatureVerified;
+
     log("info", "Update dispatch requested", {
       request_id: requestId,
       target,
@@ -2702,6 +3359,9 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       package_url: resolvedPackageUrl,
       hash_source: hashSource,
       package_size_bytes: packageSizeBytes ?? null,
+      signature_verified: signatureVerified,
+      signature_key_id: signatureKeyId,
+      use_privileged_helper: usePrivilegedHelper,
     });
 
     const nextDesignationPrefix = inferDesignationPrefixFromPackageUrl(resolvedPackageUrl);
@@ -2740,6 +3400,18 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       }
 
       const connected = deps.registry.get(deviceId);
+      const knownCapabilities = connected?.capabilities ?? (Array.isArray(knownDevice.capabilities) ? knownDevice.capabilities : []);
+      if (usePrivilegedHelper && !knownCapabilities.includes("privileged_helper_split")) {
+        rollbackPreparedDesignationChanges();
+        reply.code(409).send({
+          ok: false,
+          request_id: requestId,
+          message: `${deviceId} does not support privileged helper split`,
+          error_code: "PRIVILEGED_HELPER_NOT_SUPPORTED",
+        });
+        return;
+      }
+
       if (!connected) {
         if (!queueIfOffline) {
           rollbackPreparedDesignationChanges();
@@ -2781,12 +3453,15 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
         rawText: updateRawText,
         parsedTarget: target,
         parsedType: "AGENT_UPDATE",
-        argsJson: JSON.stringify({
+        argsJson: JSON.stringify(makeUpdateArgs({
           version,
-          url: resolvedPackageUrl,
+          packageUrl: resolvedPackageUrl,
           sha256,
-          ...(packageSizeBytes ? { size_bytes: packageSizeBytes } : {}),
-        }),
+          sizeBytes: packageSizeBytes,
+          signature,
+          signatureKeyId,
+          usePrivilegedHelper,
+        })),
         status: "queued",
         resultMessage: null,
         errorCode: null,
@@ -2804,6 +3479,9 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           packageUrl: resolvedPackageUrl,
           sha256,
           sizeBytes: packageSizeBytes,
+          signature,
+          signatureKeyId,
+          usePrivilegedHelper,
         });
       }
 
@@ -2821,12 +3499,15 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
 
     const command = {
       type: "AGENT_UPDATE" as const,
-      args: {
+      args: makeUpdateArgs({
         version,
-        url: resolvedPackageUrl,
+        packageUrl: resolvedPackageUrl,
         sha256,
-        ...(packageSizeBytes ? { size_bytes: packageSizeBytes } : {}),
-      },
+        sizeBytes: packageSizeBytes,
+        signature,
+        signatureKeyId,
+        usePrivilegedHelper,
+      }),
     };
     const immediateTargetDeviceIds = targetDeviceIds.filter((deviceId) => !queuedOfflineDeviceIds.has(deviceId));
 
@@ -2845,6 +3526,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           sha256,
           hash_source: hashSource,
           package_size_bytes: packageSizeBytes ?? null,
+          signature,
+          signature_key_id: signatureKeyId,
+          signature_verified: signatureVerified,
+          use_privileged_helper: usePrivilegedHelper,
         });
         return;
       }
@@ -2908,6 +3593,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           sha256,
           hash_source: hashSource,
           package_size_bytes: packageSizeBytes ?? null,
+          signature,
+          signature_key_id: signatureKeyId,
+          signature_verified: signatureVerified,
+          use_privileged_helper: usePrivilegedHelper,
           designation_change: designationChange
             ? {
                 previous_device_id: designationChange.currentDeviceId,
@@ -2956,6 +3645,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           sha256,
           hash_source: hashSource,
           package_size_bytes: packageSizeBytes ?? null,
+          signature,
+          signature_key_id: signatureKeyId,
+          signature_verified: signatureVerified,
+          use_privileged_helper: usePrivilegedHelper,
         });
       }
 
@@ -3043,6 +3736,10 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       sha256,
       hash_source: hashSource,
       package_size_bytes: packageSizeBytes ?? null,
+      signature,
+      signature_key_id: signatureKeyId,
+      signature_verified: signatureVerified,
+      use_privileged_helper: usePrivilegedHelper,
       results: results.map((result: CommandDispatchResult) => ({
         device_id: result.device_id,
         ok: result.ok,

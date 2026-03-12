@@ -74,6 +74,7 @@ func Capabilities() []string {
 		"power_control",
 		"session_control",
 		"updater",
+		"privileged_helper_split",
 	}
 }
 

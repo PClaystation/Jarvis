@@ -104,6 +104,7 @@ func Capabilities() []string {
 		"emergency_lockdown",
 		"open_app",
 		"updater",
+		"privileged_helper_split",
 		"lite_profile_s1",
 		"safe_profile_se1",
 	}

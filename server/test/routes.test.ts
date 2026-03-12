@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync, sign } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import { EventHub } from "../src/events/eventHub";
 import { sha256Hex } from "../src/utils/crypto";
 import type { CommandRouter } from "../src/router/commandRouter";
 import type { QueuedUpdateDispatcher } from "../src/update/queuedUpdateDispatcher";
+import { buildUpdateSignaturePayload } from "../src/update/signatureVerifier";
 
 class MockSocket {
   public readyState = 1;
@@ -128,6 +130,8 @@ function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
     updateMaxPackageBytes: 10_000_000,
     enforceHttpsUpdateUrl: false,
     allowAutomaticUpdates: false,
+    updateRequireSignature: false,
+    updateSigningKeys: {},
     corsAllowedOrigins: ["*"],
     publicWsUrl: "ws://localhost/ws/agent",
     pwaPublicUrl: "http://localhost/app",
@@ -287,6 +291,140 @@ test("scoped API key can read devices but cannot execute updates", async () => {
     });
 
     assert.equal(updateAttempt.statusCode, 403);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("API key rotation issues a replacement and revokes the old key", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const createKey = await server.inject({
+      method: "POST",
+      url: "/api/auth/keys",
+      headers: authHeaders("owner-token"),
+      payload: {
+        name: "viewer",
+        scopes: ["devices:read"],
+      },
+    });
+
+    assert.equal(createKey.statusCode, 200);
+    const created = createKey.json();
+    const keyId = created.key?.key_id as string;
+    const oldToken = created.api_key as string;
+
+    const rotate = await server.inject({
+      method: "POST",
+      url: `/api/auth/keys/${encodeURIComponent(keyId)}/rotate`,
+      headers: authHeaders("owner-token"),
+      payload: {},
+    });
+
+    assert.equal(rotate.statusCode, 200);
+    const rotated = rotate.json();
+    assert.equal(rotated.ok, true);
+    assert.equal(rotated.rotated_from, keyId);
+    assert.equal(typeof rotated.api_key, "string");
+    const newToken = rotated.api_key as string;
+
+    const oldAccess = await server.inject({
+      method: "GET",
+      url: "/api/devices",
+      headers: {
+        authorization: `Bearer ${oldToken}`,
+      },
+    });
+    assert.equal(oldAccess.statusCode, 401);
+
+    const newAccess = await server.inject({
+      method: "GET",
+      url: "/api/devices",
+      headers: {
+        authorization: `Bearer ${newToken}`,
+      },
+    });
+    assert.equal(newAccess.statusCode, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("owner token rotation supports grace window when secrets are file-managed", async () => {
+  const secretsPath = path.join(os.tmpdir(), `cordyceps-secrets-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+  const harness = await createHarness({
+    configOverrides: {
+      phoneApiTokenSource: "secrets_file",
+      agentBootstrapTokenSource: "secrets_file",
+      secretsPath,
+      secretsPathSource: "env",
+    },
+  });
+  const { server, cleanup } = harness;
+
+  try {
+    const rotate = await server.inject({
+      method: "POST",
+      url: "/api/auth/tokens/rotate",
+      headers: authHeaders("owner-token"),
+      payload: {
+        rotate_owner_token: true,
+        owner_grace_seconds: 30,
+      },
+    });
+
+    assert.equal(rotate.statusCode, 200);
+    const body = rotate.json();
+    assert.equal(body.ok, true);
+    assert.equal(typeof body.owner_token, "string");
+    assert.equal(typeof body.previous_owner_token_valid_until, "string");
+    const newOwnerToken = body.owner_token as string;
+
+    const oldTokenAccess = await server.inject({
+      method: "GET",
+      url: "/api/devices",
+      headers: {
+        authorization: "Bearer owner-token",
+      },
+    });
+    assert.equal(oldTokenAccess.statusCode, 200);
+
+    const newTokenAccess = await server.inject({
+      method: "GET",
+      url: "/api/devices",
+      headers: {
+        authorization: `Bearer ${newOwnerToken}`,
+      },
+    });
+    assert.equal(newTokenAccess.statusCode, 200);
+  } finally {
+    await cleanup();
+    try {
+      fs.unlinkSync(secretsPath);
+    } catch {
+      // ignore cleanup races
+    }
+  }
+});
+
+test("owner token rotation rejects env-managed owner token", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const rotate = await server.inject({
+      method: "POST",
+      url: "/api/auth/tokens/rotate",
+      headers: authHeaders("owner-token"),
+      payload: {
+        rotate_owner_token: true,
+      },
+    });
+
+    assert.equal(rotate.statusCode, 409);
+    assert.equal(rotate.json().error_code, "OWNER_TOKEN_ENV_MANAGED");
   } finally {
     await cleanup();
   }
@@ -512,6 +650,118 @@ test("queue_if_offline requires a single target device", async () => {
 
     assert.equal(response.statusCode, 400);
     assert.equal(response.json().error_code, "INVALID_QUEUE_TARGET");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("update requires signature when configured and accepts valid signed payload", async () => {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" }).toString();
+  const harness = await createHarness({
+    configOverrides: {
+      updateRequireSignature: true,
+      updateSigningKeys: {
+        release: publicKeyPem,
+      },
+    },
+  });
+  const { server, router, cleanup } = harness;
+
+  try {
+    const unsigned = await server.inject({
+      method: "POST",
+      url: "/api/update",
+      headers: authHeaders("owner-token"),
+      payload: {
+        target: "m1",
+        version: "1.0.1",
+        package_url: "https://example.com/agent.exe",
+        sha256: "a".repeat(64),
+      },
+    });
+
+    assert.equal(unsigned.statusCode, 400);
+    assert.equal(unsigned.json().error_code, "SIGNATURE_REQUIRED");
+
+    const signaturePayload = buildUpdateSignaturePayload({
+      version: "1.0.1",
+      packageUrl: "https://example.com/agent.exe",
+      sha256: "a".repeat(64),
+      sizeBytes: null,
+    });
+    const signature = sign(null, signaturePayload, privateKey).toString("base64");
+
+    const signed = await server.inject({
+      method: "POST",
+      url: "/api/update",
+      headers: authHeaders("owner-token"),
+      payload: {
+        target: "m1",
+        version: "1.0.1",
+        package_url: "https://example.com/agent.exe",
+        sha256: "a".repeat(64),
+        signature,
+        signature_key_id: "release",
+      },
+    });
+
+    assert.equal(signed.statusCode, 200);
+    const body = signed.json();
+    assert.equal(body.signature_verified, true);
+    assert.equal(body.signature_key_id, "release");
+    assert.equal(router.dispatchedToDevice.length, 1);
+    assert.equal(router.dispatchedToDevice[0]?.args.signature, signature);
+    assert.equal(router.dispatchedToDevice[0]?.args.signature_key_id, "release");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("privileged helper update requires device capability", async () => {
+  const harness = await createHarness();
+  const { server, router, cleanup } = harness;
+
+  try {
+    const unsupported = await server.inject({
+      method: "POST",
+      url: "/api/update",
+      headers: authHeaders("owner-token"),
+      payload: {
+        target: "m1",
+        version: "1.0.1",
+        package_url: "https://example.com/agent.exe",
+        sha256: "a".repeat(64),
+        use_privileged_helper: true,
+      },
+    });
+
+    assert.equal(unsupported.statusCode, 409);
+    assert.equal(unsupported.json().error_code, "PRIVILEGED_HELPER_NOT_SUPPORTED");
+
+    addOnlineDevice(harness, {
+      deviceId: "t1",
+      capabilities: ["updater", "privileged_helper_split"],
+    });
+
+    const supported = await server.inject({
+      method: "POST",
+      url: "/api/update",
+      headers: authHeaders("owner-token"),
+      payload: {
+        target: "t1",
+        version: "1.0.1",
+        package_url: "https://example.com/agent.exe",
+        sha256: "a".repeat(64),
+        use_privileged_helper: true,
+      },
+    });
+
+    assert.equal(supported.statusCode, 200);
+    assert.equal(supported.json().use_privileged_helper, true);
+    assert.equal(router.dispatchedToDevice.length, 1);
+    assert.equal(router.dispatchedToDevice[0]?.deviceId, "t1");
+    assert.equal(router.dispatchedToDevice[0]?.args.use_privileged_helper, true);
   } finally {
     await cleanup();
   }
@@ -791,6 +1041,97 @@ test("devices endpoint includes derived agent profile", async () => {
 
     const m1 = devices.find((device) => device.device_id === "m1");
     assert.equal(m1?.profile, "legacy");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("device detail endpoint returns control, aliases, queue, and recent logs", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const aliasSave = await server.inject({
+      method: "PUT",
+      url: "/api/devices/m1/app-aliases",
+      headers: authHeaders("owner-token"),
+      payload: {
+        aliases: [{ alias: "browser work", app: "chrome" }],
+      },
+    });
+    assert.equal(aliasSave.statusCode, 200);
+
+    const ping = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 ping",
+      },
+    });
+    assert.equal(ping.statusCode, 200);
+
+    const detail = await server.inject({
+      method: "GET",
+      url: "/api/devices/m1?logs_limit=5",
+      headers: {
+        authorization: "Bearer owner-token",
+      },
+    });
+
+    assert.equal(detail.statusCode, 200);
+    const body = detail.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.device.device_id, "m1");
+    assert.equal(Array.isArray(body.aliases), true);
+    assert.equal(Array.isArray(body.queued_updates), true);
+    assert.equal(Array.isArray(body.recent_logs), true);
+    assert.equal(typeof body.realtime.connected, "boolean");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("admin overview endpoint requires admin scope and returns aggregate data", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const ownerView = await server.inject({
+      method: "GET",
+      url: "/api/admin/overview",
+      headers: {
+        authorization: "Bearer owner-token",
+      },
+    });
+
+    assert.equal(ownerView.statusCode, 200);
+    const ownerBody = ownerView.json();
+    assert.equal(ownerBody.ok, true);
+    assert.equal(typeof ownerBody.health.devices_total, "number");
+    assert.equal(typeof ownerBody.health.pending_commands, "number");
+    assert.equal(typeof ownerBody.online_capabilities, "object");
+
+    const createScoped = await server.inject({
+      method: "POST",
+      url: "/api/auth/keys",
+      headers: authHeaders("owner-token"),
+      payload: {
+        name: "viewer",
+        scopes: ["devices:read"],
+      },
+    });
+    assert.equal(createScoped.statusCode, 200);
+    const scopedToken = createScoped.json().api_key as string;
+
+    const forbidden = await server.inject({
+      method: "GET",
+      url: "/api/admin/overview",
+      headers: {
+        authorization: `Bearer ${scopedToken}`,
+      },
+    });
+    assert.equal(forbidden.statusCode, 403);
   } finally {
     await cleanup();
   }

@@ -62,6 +62,77 @@ function readBool(name: string, fallback: boolean): boolean {
   throw new Error(`Invalid boolean for ${name}`);
 }
 
+function normalizeSigningKeyId(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^[a-z0-9._-]{1,40}$/.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function parseUpdateSigningKeys(name: string): Record<string, string> {
+  const raw = process.env[name]?.trim();
+  if (!raw) {
+    return {};
+  }
+
+  const out: Record<string, string> = {};
+  const assign = (rawKeyId: string, rawValue: string): void => {
+    const keyId = normalizeSigningKeyId(rawKeyId);
+    if (!keyId) {
+      throw new Error(`Invalid signing key id in ${name}`);
+    }
+
+    const keyValue = rawValue.trim();
+    if (!keyValue || keyValue.length > 8192) {
+      throw new Error(`Invalid signing key value for ${keyId} in ${name}`);
+    }
+
+    out[keyId] = keyValue;
+  };
+
+  if (raw.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      for (const [keyId, value] of Object.entries(parsed)) {
+        if (typeof value !== "string") {
+          throw new Error(`Signing key ${keyId} must be a string`);
+        }
+        assign(keyId, value);
+      }
+
+      return out;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid JSON for ${name}: ${message}`);
+    }
+  }
+
+  const entries = raw.split(/[,\n;]/);
+  for (const entry of entries) {
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const splitIndex = trimmed.indexOf("=");
+    const fallbackSplitIndex = trimmed.indexOf(":");
+    const separatorIndex = splitIndex >= 0 ? splitIndex : fallbackSplitIndex;
+    if (separatorIndex <= 0) {
+      throw new Error(`Invalid signing key entry in ${name}: ${trimmed}`);
+    }
+
+    assign(trimmed.slice(0, separatorIndex), trimmed.slice(separatorIndex + 1));
+  }
+
+  return out;
+}
+
 function isRealToken(value: string | undefined, placeholder: string): value is string {
   const normalized = value?.trim() ?? "";
   return normalized.length > 0 && normalized !== placeholder;
@@ -295,6 +366,8 @@ export interface AppConfig {
   updateMaxPackageBytes: number;
   enforceHttpsUpdateUrl: boolean;
   allowAutomaticUpdates: boolean;
+  updateRequireSignature: boolean;
+  updateSigningKeys: Record<string, string>;
   corsAllowedOrigins: string[];
   publicWsUrl: string;
   pwaPublicUrl: string;
@@ -326,6 +399,11 @@ export function loadConfig(): AppConfig {
   const updateMaxPackageBytes = readInt("UPDATE_MAX_PACKAGE_BYTES", 314572800);
   const enforceHttpsUpdateUrl = readBool("ENFORCE_HTTPS_UPDATE_URL", true);
   const allowAutomaticUpdates = readBool("ALLOW_AUTOMATIC_UPDATES", false);
+  const updateRequireSignature = readBool("UPDATE_REQUIRE_SIGNATURE", false);
+  const updateSigningKeys = parseUpdateSigningKeys("UPDATE_SIGNING_KEYS");
+  if (updateRequireSignature && Object.keys(updateSigningKeys).length === 0) {
+    throw new Error("UPDATE_REQUIRE_SIGNATURE=true requires at least one key in UPDATE_SIGNING_KEYS");
+  }
   const corsAllowedOrigins = readCsv("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ALLOWED_ORIGINS);
   const publicWsUrl = process.env.PUBLIC_WS_URL ?? `ws://localhost:${port}/ws/agent`;
   const pwaPublicUrl = process.env.PWA_PUBLIC_URL ?? DEFAULT_PWA_PUBLIC_URL;
@@ -354,6 +432,8 @@ export function loadConfig(): AppConfig {
     updateMaxPackageBytes,
     enforceHttpsUpdateUrl,
     allowAutomaticUpdates,
+    updateRequireSignature,
+    updateSigningKeys,
     corsAllowedOrigins,
     publicWsUrl,
     pwaPublicUrl,

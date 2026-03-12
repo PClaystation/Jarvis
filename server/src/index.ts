@@ -230,6 +230,7 @@ async function main(): Promise<void> {
     wsPingIntervalMs: config.wsPingIntervalMs,
     wsMaxMessageBytes: config.wsMaxMessageBytes,
     allowAutomaticUpdates: config.allowAutomaticUpdates,
+    updateRequireSignature: config.updateRequireSignature,
   });
 
   const heartbeatSweepTimer = setInterval(() => {
@@ -276,6 +277,8 @@ async function main(): Promise<void> {
     update_max_package_bytes: config.updateMaxPackageBytes,
     enforce_https_update_url: config.enforceHttpsUpdateUrl,
     allow_automatic_updates: config.allowAutomaticUpdates,
+    update_require_signature: config.updateRequireSignature,
+    update_signing_key_ids: Object.keys(config.updateSigningKeys),
     cors_allowed_origins: config.corsAllowedOrigins,
     phone_token_source: config.phoneApiTokenSource,
     bootstrap_token_source: config.agentBootstrapTokenSource,
