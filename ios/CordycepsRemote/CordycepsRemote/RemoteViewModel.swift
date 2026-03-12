@@ -9,11 +9,16 @@ final class RemoteViewModel: ObservableObject {
     static let apiBase = "cordyceps.ios.apiBase"
     static let token = "cordyceps.ios.phoneToken"
     static let target = "cordyceps.ios.target"
+    static let renameDevice = "cordyceps.ios.renameDevice"
+    static let aliasDevice = "cordyceps.ios.aliasDevice"
     static let updateTarget = "cordyceps.ios.updateTarget"
     static let updateVersion = "cordyceps.ios.updateVersion"
     static let updateURL = "cordyceps.ios.updateURL"
     static let updateSha = "cordyceps.ios.updateSha"
     static let updateSize = "cordyceps.ios.updateSize"
+    static let updateQueueOffline = "cordyceps.ios.updateQueueOffline"
+    static let adminTarget = "cordyceps.ios.adminTarget"
+    static let adminShell = "cordyceps.ios.adminShell"
     static let lastSuccess = "cordyceps.ios.lastSuccess"
     static let lastAction = "cordyceps.ios.lastAction"
     static let commandHistory = "cordyceps.ios.commandHistory"
@@ -32,11 +37,22 @@ final class RemoteViewModel: ObservableObject {
   @Published var argumentInput = ""
   @Published var commandText = ""
 
+  @Published var renameDeviceInput: String
+  @Published var renameDisplayNameInput = ""
+  @Published var aliasDeviceInput: String
+  @Published var aliasKeyInput = ""
+  @Published var aliasAppInput = ""
+
+  @Published var adminTargetInput: String
+  @Published var adminShellInput: String
+  @Published var adminCommandInput = ""
+
   @Published var updateTargetInput: String
   @Published var updateVersionInput: String
   @Published var updateURLInput: String
   @Published var updateShaInput: String
   @Published var updateSizeInput: String
+  @Published var updateQueueOfflineInput: Bool
 
   @Published var pairingLinkInput = ""
   @Published var deviceSearchInput = ""
@@ -63,6 +79,9 @@ final class RemoteViewModel: ObservableObject {
   @Published var isLoadingAPIKeys = false
   @Published var isSavingGroup = false
   @Published var isDeletingGroup = false
+  @Published var isSavingDisplayName = false
+  @Published var isSavingAlias = false
+  @Published var isSendingAdminCommand = false
   @Published var isCreatingAPIKey = false
   @Published var isTestingToken = false
   @Published var isSendingCommand = false
@@ -93,8 +112,18 @@ final class RemoteViewModel: ObservableObject {
 
   init() {
     let initialTarget = defaults.string(forKey: DefaultsKey.target) ?? "m1"
+    let initialRenameDevice = defaults.string(forKey: DefaultsKey.renameDevice) ?? initialTarget
+    let initialAliasDevice = defaults.string(forKey: DefaultsKey.aliasDevice) ?? initialTarget
+    let initialAdminTarget = defaults.string(forKey: DefaultsKey.adminTarget) ?? "a1"
+    let initialAdminShell = Self.normalizeAdminShellValue(defaults.string(forKey: DefaultsKey.adminShell) ?? "cmd")
     let rememberedAction = defaults.string(forKey: DefaultsKey.lastAction) ?? "ping"
     let initialToken = defaults.string(forKey: DefaultsKey.token) ?? ""
+    let initialQueueOffline: Bool
+    if defaults.object(forKey: DefaultsKey.updateQueueOffline) == nil {
+      initialQueueOffline = true
+    } else {
+      initialQueueOffline = defaults.bool(forKey: DefaultsKey.updateQueueOffline)
+    }
 
     apiBaseInput = defaults.string(forKey: DefaultsKey.apiBase) ?? ""
     tokenInput = initialToken
@@ -102,11 +131,23 @@ final class RemoteViewModel: ObservableObject {
 
     selectedActionValue = CommandLibrary.safeAction(rememberedAction)
 
+    let normalizedInitialTarget = Self.normalizeDeviceIDValue(initialTarget)
+    let fallbackSingleDevice = normalizedInitialTarget.isEmpty ? "m1" : normalizedInitialTarget
+    let normalizedRenameDevice = Self.normalizeDeviceIDValue(initialRenameDevice)
+    let normalizedAliasDevice = Self.normalizeDeviceIDValue(initialAliasDevice)
+    let normalizedAdminTarget = Self.normalizeDeviceIDValue(initialAdminTarget)
+    renameDeviceInput = normalizedRenameDevice.isEmpty ? fallbackSingleDevice : normalizedRenameDevice
+    aliasDeviceInput = normalizedAliasDevice.isEmpty ? fallbackSingleDevice : normalizedAliasDevice
+
+    adminTargetInput = normalizedAdminTarget.isEmpty ? "a1" : normalizedAdminTarget
+    adminShellInput = initialAdminShell
+
     updateTargetInput = defaults.string(forKey: DefaultsKey.updateTarget) ?? initialTarget
     updateVersionInput = defaults.string(forKey: DefaultsKey.updateVersion) ?? ""
     updateURLInput = defaults.string(forKey: DefaultsKey.updateURL) ?? ""
     updateShaInput = defaults.string(forKey: DefaultsKey.updateSha) ?? ""
     updateSizeInput = defaults.string(forKey: DefaultsKey.updateSize) ?? ""
+    updateQueueOfflineInput = initialQueueOffline
     recentCommands = []
 
     connectionState = initialToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .disconnected : .retrying
@@ -277,6 +318,8 @@ final class RemoteViewModel: ObservableObject {
       defaults.set(updateTargetInput, forKey: DefaultsKey.updateTarget)
     }
 
+    syncSingleDeviceControls(with: target)
+
     connectionState = token.isEmpty ? .disconnected : .retrying
     commandText = composeCommand()
     startPollingIfNeeded()
@@ -303,6 +346,20 @@ final class RemoteViewModel: ObservableObject {
     defaults.set(url, forKey: DefaultsKey.updateURL)
     defaults.set(sha, forKey: DefaultsKey.updateSha)
     defaults.set(size, forKey: DefaultsKey.updateSize)
+    defaults.set(updateQueueOfflineInput, forKey: DefaultsKey.updateQueueOffline)
+  }
+
+  func persistAdminSettings() {
+    let target = normalizeDeviceID(adminTargetInput)
+    let shell = normalizeAdminShell(adminShellInput)
+
+    adminShellInput = shell
+    defaults.set(shell, forKey: DefaultsKey.adminShell)
+
+    if !target.isEmpty {
+      adminTargetInput = target
+      defaults.set(target, forKey: DefaultsKey.adminTarget)
+    }
   }
 
   func targetDidChange() {
@@ -315,6 +372,7 @@ final class RemoteViewModel: ObservableObject {
     if updateTargetInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       updateTargetInput = normalized
     }
+    syncSingleDeviceControls(with: normalized)
     composeFromInputs()
   }
 
@@ -359,9 +417,147 @@ final class RemoteViewModel: ObservableObject {
     updateTargetInput = normalized
     defaults.set(normalized, forKey: DefaultsKey.target)
     defaults.set(normalized, forKey: DefaultsKey.updateTarget)
+    syncSingleDeviceControls(with: normalized)
     commandText = composeCommand()
     setStatus("Target set to \(normalized).", isError: false)
     setResult(message: "Target set to \(normalized).", rawBody: "Target set to \(normalized).", isError: false)
+  }
+
+  func saveDeviceDisplayName() async {
+    guard !isSavingDisplayName else {
+      return
+    }
+
+    let deviceID = normalizeDeviceID(renameDeviceInput)
+    let displayName = renameDisplayNameInput.trimmed
+
+    guard !deviceID.isEmpty else {
+      setStatus("Device ID is required.", isError: true)
+      setResult(message: "Device ID is required.", rawBody: "Device ID is required.", isError: true)
+      return
+    }
+
+    isSavingDisplayName = true
+    defer { isSavingDisplayName = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.saveDeviceDisplayName(
+        config: config,
+        deviceID: deviceID,
+        displayName: displayName
+      )
+
+      connectionState = .connected
+      renameDeviceInput = deviceID
+      defaults.set(deviceID, forKey: DefaultsKey.renameDevice)
+      await loadDevices(silent: true, fromPolling: false)
+
+      let message = response.body.message ?? (displayName.isEmpty ? "Display name cleared." : "Display name saved.")
+      setStatus(message, isError: false)
+      setResult(
+        message: message,
+        rawBody: response.rawJSON,
+        requestID: deviceID,
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+      triggerFeedback(.success)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
+  func saveDeviceAlias() async {
+    guard !isSavingAlias else {
+      return
+    }
+
+    let deviceID = normalizeDeviceID(aliasDeviceInput)
+    let alias = normalizeAlias(aliasKeyInput)
+    let app = aliasAppInput.normalizedActionText
+
+    guard !deviceID.isEmpty else {
+      setStatus("Alias device ID is required.", isError: true)
+      setResult(message: "Alias device ID is required.", rawBody: "Alias device ID is required.", isError: true)
+      return
+    }
+
+    guard !alias.isEmpty else {
+      setStatus("Alias phrase is required.", isError: true)
+      setResult(message: "Alias phrase is required.", rawBody: "Alias phrase is required.", isError: true)
+      return
+    }
+
+    guard alias.count <= 80,
+          alias.range(of: #"^[a-z0-9 _-]+$"#, options: .regularExpression) != nil
+    else {
+      setStatus("Alias can only use a-z, 0-9, spaces, _ or -, max 80 chars.", isError: true)
+      setResult(
+        message: "Alias can only use a-z, 0-9, spaces, _ or -, max 80 chars.",
+        rawBody: "Alias can only use a-z, 0-9, spaces, _ or -, max 80 chars.",
+        isError: true
+      )
+      return
+    }
+
+    guard !app.isEmpty else {
+      setStatus("Canonical app is required.", isError: true)
+      setResult(message: "Canonical app is required.", rawBody: "Canonical app is required.", isError: true)
+      return
+    }
+
+    isSavingAlias = true
+    defer { isSavingAlias = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let existing = try await CordycepsClient.loadDeviceAppAliases(config: config, deviceID: deviceID)
+
+      var merged: [DeviceAppAliasUpsertEntry] = []
+      var updated = false
+      for entry in existing.body.aliases {
+        let existingAlias = normalizeAlias(entry.alias)
+        let existingApp = entry.app.normalizedActionText
+        if existingAlias.isEmpty || existingApp.isEmpty {
+          continue
+        }
+
+        if existingAlias == alias {
+          merged.append(DeviceAppAliasUpsertEntry(alias: alias, app: app))
+          updated = true
+        } else {
+          merged.append(DeviceAppAliasUpsertEntry(alias: existingAlias, app: existingApp))
+        }
+      }
+
+      if !updated {
+        merged.append(DeviceAppAliasUpsertEntry(alias: alias, app: app))
+      }
+
+      let response = try await CordycepsClient.saveDeviceAppAliases(
+        config: config,
+        deviceID: deviceID,
+        aliases: merged
+      )
+
+      connectionState = .connected
+      aliasDeviceInput = deviceID
+      defaults.set(deviceID, forKey: DefaultsKey.aliasDevice)
+
+      let message = response.body.message ?? "Device app alias saved."
+      setStatus(message, isError: false)
+      setResult(
+        message: message,
+        rawBody: response.rawJSON,
+        requestID: deviceID,
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+      triggerFeedback(.success)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
   }
 
   func loadDevices(silent: Bool = false, fromPolling: Bool = false) async {
@@ -762,6 +958,67 @@ final class RemoteViewModel: ObservableObject {
     }
   }
 
+  func sendAdminCommand() async {
+    guard !isSendingAdminCommand else {
+      return
+    }
+
+    let target = normalizeDeviceID(adminTargetInput)
+    let shell = normalizeAdminShell(adminShellInput)
+    let commandValue = adminCommandInput.trimmed
+
+    guard !target.isEmpty else {
+      setStatus("Admin target is required.", isError: true)
+      setResult(message: "Admin target is required.", rawBody: "Admin target is required.", isError: true)
+      return
+    }
+
+    guard !commandValue.isEmpty else {
+      setStatus("Admin command text is empty.", isError: true)
+      setResult(message: "Admin command text is empty.", rawBody: "Admin command text is empty.", isError: true)
+      return
+    }
+
+    adminTargetInput = target
+    adminShellInput = shell
+    persistAdminSettings()
+
+    isSendingAdminCommand = true
+    defer { isSendingAdminCommand = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.sendAdminCommand(
+        config: config,
+        target: target,
+        shell: shell,
+        commandValue: commandValue
+      )
+
+      connectionState = .connected
+      let isError = response.body.ok == false
+      let message = response.body.message ?? response.body.error_code ?? (isError ? "Admin command failed." : "Admin command sent.")
+      if !isError {
+        setLastCommandSuccess()
+        triggerFeedback(.success)
+      } else {
+        triggerFeedback(.error)
+      }
+
+      setStatus(message, isError: isError)
+      setResult(
+        message: message,
+        rawBody: response.rawJSON,
+        requestID: response.body.request_id ?? "-",
+        latencyMs: response.latencyMs,
+        isError: isError
+      )
+      await loadCommandLogs(silent: true, append: false)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
   func pushUpdate() async {
     guard !isPushingUpdate else {
       return
@@ -773,6 +1030,7 @@ final class RemoteViewModel: ObservableObject {
     let version = updateVersionInput
     let packageURL = updateURLInput
     let sha = updateShaInput.isEmpty ? nil : updateShaInput
+    let queueIfOffline = updateQueueOfflineInput && target != "all"
 
     guard !target.isEmpty else {
       setStatus("Update target is required.", isError: true)
@@ -829,6 +1087,7 @@ final class RemoteViewModel: ObservableObject {
         target: target,
         version: version,
         packageURL: packageURL,
+        queueIfOffline: queueIfOffline,
         sha256: sha,
         sizeBytes: sizeBytes
       )
@@ -894,6 +1153,7 @@ final class RemoteViewModel: ObservableObject {
     let updateURL = read("update_url")
     let updateSha = read("update_sha")
     let updateSize = read("update_size")
+    let updateQueueOffline = read("update_queue_offline")
 
     var applied = false
 
@@ -956,6 +1216,13 @@ final class RemoteViewModel: ObservableObject {
     if !updateSize.isEmpty {
       updateSizeInput = updateSize
       defaults.set(updateSize, forKey: DefaultsKey.updateSize)
+      applied = true
+    }
+
+    if !updateQueueOffline.isEmpty {
+      let normalized = updateQueueOffline.trimmed.lowercased()
+      updateQueueOfflineInput = !(normalized == "0" || normalized == "false" || normalized == "no")
+      defaults.set(updateQueueOfflineInput, forKey: DefaultsKey.updateQueueOffline)
       applied = true
     }
 
@@ -1403,6 +1670,46 @@ final class RemoteViewModel: ObservableObject {
       return ""
     }
     return normalized
+  }
+
+  private static func normalizeDeviceIDValue(_ input: String) -> String {
+    let normalized = input.normalizedActionText
+    guard normalized.range(of: #"^[a-z][a-z0-9_-]{1,31}$"#, options: .regularExpression) != nil else {
+      return ""
+    }
+    return normalized
+  }
+
+  private static func normalizeAdminShellValue(_ input: String) -> String {
+    let normalized = input.trimmed.lowercased()
+    if normalized == "powershell" {
+      return "powershell"
+    }
+    return "cmd"
+  }
+
+  private func normalizeDeviceID(_ input: String) -> String {
+    Self.normalizeDeviceIDValue(input)
+  }
+
+  private func normalizeAlias(_ input: String) -> String {
+    input.normalizedActionText
+  }
+
+  private func normalizeAdminShell(_ input: String) -> String {
+    Self.normalizeAdminShellValue(input)
+  }
+
+  private func syncSingleDeviceControls(with target: String) {
+    let singleDevice = normalizeDeviceID(target)
+    guard !singleDevice.isEmpty else {
+      return
+    }
+
+    renameDeviceInput = singleDevice
+    aliasDeviceInput = singleDevice
+    defaults.set(singleDevice, forKey: DefaultsKey.renameDevice)
+    defaults.set(singleDevice, forKey: DefaultsKey.aliasDevice)
   }
 
   private func isValidTarget(_ value: String) -> Bool {

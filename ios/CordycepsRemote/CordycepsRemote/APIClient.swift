@@ -93,6 +93,49 @@ enum CordycepsClient {
     )
   }
 
+  static func saveDeviceDisplayName(
+    config: ConnectionConfig,
+    deviceID: String,
+    displayName: String
+  ) async throws -> APIResponse<DeviceResponse> {
+    let payload = DeviceDisplayNameUpsertRequest(display_name: displayName)
+    return try await execute(
+      config: config,
+      path: "/api/devices/\(deviceID)/display-name",
+      method: "PUT",
+      body: payload,
+      responseType: DeviceResponse.self
+    )
+  }
+
+  static func loadDeviceAppAliases(
+    config: ConnectionConfig,
+    deviceID: String
+  ) async throws -> APIResponse<DeviceAppAliasesResponse> {
+    try await execute(
+      config: config,
+      path: "/api/devices/\(deviceID)/app-aliases",
+      method: "GET",
+      body: Optional<CommandRequest>.none,
+      responseType: DeviceAppAliasesResponse.self
+    )
+  }
+
+  static func saveDeviceAppAliases(
+    config: ConnectionConfig,
+    deviceID: String,
+    aliases: [DeviceAppAliasUpsertEntry]
+  ) async throws -> APIResponse<DeviceAppAliasesResponse> {
+    let payload = DeviceAppAliasesUpsertRequest(aliases: aliases)
+    return try await execute(
+      config: config,
+      path: "/api/devices/\(deviceID)/app-aliases",
+      method: "PUT",
+      body: payload,
+      responseType: DeviceAppAliasesResponse.self
+    )
+  }
+
   static func deleteGroup(config: ConnectionConfig, groupID: String) async throws -> APIResponse<GroupResponse> {
     try await execute(
       config: config,
@@ -185,6 +228,33 @@ enum CordycepsClient {
     )
   }
 
+  static func sendAdminCommand(
+    config: ConnectionConfig,
+    target: String,
+    shell: String,
+    commandValue: String
+  ) async throws -> APIResponse<CommandResponse> {
+    let requestID = requestID(prefix: "ios-admin")
+    let action = shell == "powershell" ? "ps" : "cmd"
+    let payload = CommandRequest(
+      request_id: requestID,
+      text: "\(target) admin \(action) \(commandValue)",
+      source: "ios-admin",
+      is_async: true,
+      timeout_ms: 120_000,
+      sent_at: isoFormatter.string(from: Date()),
+      client_version: "cordyceps-remote-ios-v3"
+    )
+
+    return try await execute(
+      config: config,
+      path: "/api/command",
+      method: "POST",
+      body: payload,
+      responseType: CommandResponse.self
+    )
+  }
+
   static func sendGroupCommand(
     config: ConnectionConfig,
     groupID: String,
@@ -213,6 +283,7 @@ enum CordycepsClient {
     target: String,
     version: String,
     packageURL: String,
+    queueIfOffline: Bool,
     sha256: String?,
     sizeBytes: Int?
   ) async throws -> APIResponse<UpdateResponse> {
@@ -223,6 +294,7 @@ enum CordycepsClient {
       target: target,
       version: version,
       package_url: packageURL,
+      queue_if_offline: queueIfOffline,
       sha256: sha256,
       size_bytes: sizeBytes
     )
@@ -243,7 +315,7 @@ enum CordycepsClient {
     body: RequestBody?,
     responseType: ResponseBody.Type
   ) async throws -> APIResponse<ResponseBody> {
-    var request = try makeRequest(config: config, path: path, method: method, body: body)
+    let request = try makeRequest(config: config, path: path, method: method, body: body)
 
     let data: Data
     let response: URLResponse

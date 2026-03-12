@@ -19,6 +19,7 @@ struct ContentView: View {
             devicesCard
             groupsCard
             commandCard
+            adminCommandCard
             updateCard
             historyCard
             apiKeysCard
@@ -218,6 +219,61 @@ struct ContentView: View {
               .foregroundStyle(Color.white.opacity(0.70))
               .frame(maxWidth: .infinity, alignment: .trailing)
           }
+        }
+
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Shared Device Name")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          HStack(spacing: 8) {
+            TextField("Device ID (t1)", text: $viewModel.renameDeviceInput)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .cordycepsFieldStyle()
+
+            TextField("Display Name (t1-Molly)", text: $viewModel.renameDisplayNameInput)
+              .textInputAutocapitalization(.words)
+              .autocorrectionDisabled()
+              .cordycepsFieldStyle()
+          }
+
+          actionButton("Save Name", icon: "rectangle.and.pencil.and.ellipsis", role: .normal, loading: viewModel.isSavingDisplayName) {
+            Task { await viewModel.saveDeviceDisplayName() }
+          }
+
+          Text("Saved on the server so every remote sees the same label. Leave empty to clear.")
+            .font(.system(.caption2, design: .rounded))
+            .foregroundStyle(Color.white.opacity(0.66))
+        }
+
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Device App Aliases")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          TextField("Device ID (t1)", text: $viewModel.aliasDeviceInput)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .cordycepsFieldStyle()
+
+          TextField("Alias phrase (browser work)", text: $viewModel.aliasKeyInput)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .cordycepsFieldStyle()
+
+          TextField("Canonical app (chrome)", text: $viewModel.aliasAppInput)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .cordycepsFieldStyle()
+
+          actionButton("Save Alias", icon: "link.badge.plus", role: .normal, loading: viewModel.isSavingAlias) {
+            Task { await viewModel.saveDeviceAlias() }
+          }
+
+          Text("Maps custom open phrases to built-in app targets for one device.")
+            .font(.system(.caption2, design: .rounded))
+            .foregroundStyle(Color.white.opacity(0.66))
         }
 
         VStack(alignment: .leading, spacing: 8) {
@@ -644,6 +700,44 @@ struct ContentView: View {
     }
   }
 
+  private var adminCommandCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("Admin Command")
+
+        dangerZone("Runs arbitrary shell commands on an admin-capable agent. Use only for controlled maintenance.")
+
+        TextField("Admin Target (a1)", text: $viewModel.adminTargetInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.adminTargetInput) { _ in
+            viewModel.persistAdminSettings()
+          }
+
+        Picker("Shell", selection: $viewModel.adminShellInput) {
+          Text("Command Prompt").tag("cmd")
+          Text("PowerShell").tag("powershell")
+        }
+        .pickerStyle(.segmented)
+        .tint(CordycepsTheme.capsuleAmber)
+        .onChange(of: viewModel.adminShellInput) { _ in
+          viewModel.persistAdminSettings()
+        }
+
+        TextField("Command (whoami)", text: $viewModel.adminCommandInput, axis: .vertical)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .lineLimit(2 ... 6)
+          .cordycepsFieldStyle()
+
+        actionButton("Run Admin Command", icon: "terminal.fill", role: .warning, loading: viewModel.isSendingAdminCommand) {
+          Task { await viewModel.sendAdminCommand() }
+        }
+      }
+    }
+  }
+
   private var updateCard: some View {
     CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
@@ -694,6 +788,21 @@ struct ContentView: View {
           .onChange(of: viewModel.updateSizeInput) { _ in
             viewModel.persistUpdateSettings()
           }
+
+        Toggle(isOn: $viewModel.updateQueueOfflineInput) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Queue If Target Is Offline")
+              .font(.system(.footnote, design: .rounded).weight(.semibold))
+              .foregroundStyle(.white)
+            Text("Only applies to one device. The server stores the update until that agent reconnects.")
+              .font(.system(.caption2, design: .rounded))
+              .foregroundStyle(Color.white.opacity(0.68))
+          }
+        }
+        .tint(CordycepsTheme.primaryButton)
+        .onChange(of: viewModel.updateQueueOfflineInput) { _ in
+          viewModel.persistUpdateSettings()
+        }
 
         actionButton("Review & Push", icon: "arrow.up.circle.fill", role: .warning, loading: viewModel.isPushingUpdate) {
           showUpdateConfirmation = true

@@ -118,6 +118,31 @@ struct GroupResponse: Decodable {
   let error_code: String?
 }
 
+struct DeviceResponse: Decodable {
+  let ok: Bool
+  let device: DeviceRecord?
+  let message: String?
+  let error_code: String?
+}
+
+struct DeviceAppAliasRecord: Decodable, Identifiable, Hashable {
+  let device_id: String
+  let alias: String
+  let app: String
+  let created_at: String?
+  let updated_at: String?
+
+  var id: String { alias }
+}
+
+struct DeviceAppAliasesResponse: Decodable {
+  let ok: Bool
+  let device_id: String?
+  let aliases: [DeviceAppAliasRecord]
+  let message: String?
+  let error_code: String?
+}
+
 struct APIKeyRecord: Decodable, Identifiable, Hashable {
   let key_id: String
   let name: String
@@ -210,8 +235,22 @@ struct UpdateRequest: Encodable {
   let target: String
   let version: String
   let package_url: String
+  let queue_if_offline: Bool?
   let sha256: String?
   let size_bytes: Int?
+}
+
+struct DeviceDisplayNameUpsertRequest: Encodable {
+  let display_name: String
+}
+
+struct DeviceAppAliasUpsertEntry: Encodable {
+  let alias: String
+  let app: String
+}
+
+struct DeviceAppAliasesUpsertRequest: Encodable {
+  let aliases: [DeviceAppAliasUpsertEntry]
 }
 
 struct GroupUpsertRequest: Encodable {
