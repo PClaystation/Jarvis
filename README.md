@@ -145,11 +145,12 @@ Notes:
    - `WS_AUTH_TIMEOUT_MS`
    - `WS_PING_INTERVAL_MS`
    - `WS_MAX_MESSAGE_BYTES`
-   - `UPDATE_COMMAND_TIMEOUT_MS`
-   - `UPDATE_METADATA_TIMEOUT_MS`
-   - `UPDATE_MAX_PACKAGE_BYTES`
-   - `ENFORCE_HTTPS_UPDATE_URL`
-   - `CORS_ALLOWED_ORIGINS` (comma-separated explicit origins; defaults already include `https://pclaystation.github.io` and `https://mpmc.ddns.net`)
+  - `UPDATE_COMMAND_TIMEOUT_MS`
+  - `UPDATE_METADATA_TIMEOUT_MS`
+  - `UPDATE_MAX_PACKAGE_BYTES`
+  - `ENFORCE_HTTPS_UPDATE_URL`
+  - `ALLOW_AUTOMATIC_UPDATES` (default `false`; keeps update policy queueing/manual updates under operator control)
+  - `CORS_ALLOWED_ORIGINS` (comma-separated explicit origins; defaults already include `https://pclaystation.github.io` and `https://mpmc.ddns.net`)
 5. Install and run:
 
 ```bash

@@ -83,6 +83,13 @@ func main() {
 	flag.BoolVar(&runAgentFlag, "run-agent", false, "Internal flag used for detached relaunch")
 	flag.Parse()
 
+	versionFlagExplicit := false
+	flag.Visit(func(parsed *flag.Flag) {
+		if parsed.Name == "version" {
+			versionFlagExplicit = true
+		}
+	})
+
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	configureLogging(foregroundFlag, enrollOnlyFlag)
 
@@ -124,7 +131,7 @@ func main() {
 	}()
 
 	if enrollOnlyFlag {
-		if _, err := initializeAgent(cfgPath, strings.TrimSpace(serverURLFlag), strings.TrimSpace(deviceIDFlag), strings.TrimSpace(displayNameFlag), strings.TrimSpace(bootstrapTokenFlag), strings.TrimSpace(versionFlag), executablePath, execPathErr == nil); err != nil {
+		if _, err := initializeAgent(cfgPath, strings.TrimSpace(serverURLFlag), strings.TrimSpace(deviceIDFlag), strings.TrimSpace(displayNameFlag), strings.TrimSpace(bootstrapTokenFlag), strings.TrimSpace(versionFlag), versionFlagExplicit, executablePath, execPathErr == nil); err != nil {
 			log.Fatalf("initialize agent: %v", err)
 		}
 		return
@@ -137,7 +144,7 @@ func main() {
 		go maintainStartupRegistration(ctx, executablePath)
 	}
 
-	superviseAgent(ctx, cfgPath, strings.TrimSpace(serverURLFlag), strings.TrimSpace(deviceIDFlag), strings.TrimSpace(displayNameFlag), strings.TrimSpace(bootstrapTokenFlag), strings.TrimSpace(versionFlag), executablePath, execPathErr == nil)
+	superviseAgent(ctx, cfgPath, strings.TrimSpace(serverURLFlag), strings.TrimSpace(deviceIDFlag), strings.TrimSpace(displayNameFlag), strings.TrimSpace(bootstrapTokenFlag), strings.TrimSpace(versionFlag), versionFlagExplicit, executablePath, execPathErr == nil)
 }
 
 func firstRunEnroll(cfgPath string, serverBaseURL string, deviceIDInput string, displayNameInput string, bootstrapToken string, version string) (*config.Config, error) {
@@ -259,7 +266,7 @@ func firstRunEnroll(cfgPath string, serverBaseURL string, deviceIDInput string, 
 	return cfg, nil
 }
 
-func initializeAgent(cfgPath string, serverURL string, deviceID string, displayName string, bootstrapToken string, version string, executablePath string, ensureStartup bool) (*config.Config, error) {
+func initializeAgent(cfgPath string, serverURL string, deviceID string, displayName string, bootstrapToken string, version string, versionExplicit bool, executablePath string, ensureStartup bool) (*config.Config, error) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -286,8 +293,16 @@ func initializeAgent(cfgPath string, serverURL string, deviceID string, displayN
 		cfg.ServerBaseURL = serverURL
 	}
 
-	if version != "" {
+	if versionExplicit {
+		if version != "" {
+			cfg.Version = version
+		}
+	} else if cfg.Version == "" && version != "" {
 		cfg.Version = version
+	}
+
+	if cfg.Version == "" {
+		cfg.Version = defaultVersion
 	}
 
 	if cfg.HeartbeatSeconds <= 0 {
@@ -319,7 +334,7 @@ func initializeAgent(cfgPath string, serverURL string, deviceID string, displayN
 	return cfg, nil
 }
 
-func superviseAgent(ctx context.Context, cfgPath string, serverURL string, deviceID string, displayName string, bootstrapToken string, version string, executablePath string, ensureStartup bool) {
+func superviseAgent(ctx context.Context, cfgPath string, serverURL string, deviceID string, displayName string, bootstrapToken string, version string, versionExplicit bool, executablePath string, ensureStartup bool) {
 	backoff := 2 * time.Second
 
 	for {
@@ -329,7 +344,7 @@ func superviseAgent(ctx context.Context, cfgPath string, serverURL string, devic
 		default:
 		}
 
-		cfg, err := initializeAgent(cfgPath, serverURL, deviceID, displayName, bootstrapToken, version, executablePath, ensureStartup)
+		cfg, err := initializeAgent(cfgPath, serverURL, deviceID, displayName, bootstrapToken, version, versionExplicit, executablePath, ensureStartup)
 		if err != nil {
 			log.Printf("initialization failed: %v", err)
 			if !waitForRetry(ctx, backoff) {

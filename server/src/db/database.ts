@@ -115,6 +115,26 @@ export interface DeviceAppAliasRecord {
   updated_at: string;
 }
 
+export interface DeviceControlRecord {
+  device_id: string;
+  quarantine_enabled: boolean;
+  kill_switch_enabled: boolean;
+  reason: string | null;
+  updated_at: string;
+}
+
+export interface UpdatePolicyRecord {
+  policy_id: string;
+  pinned_version: string | null;
+  package_url: string | null;
+  sha256: string | null;
+  size_bytes: number | null;
+  revoked_versions: string[];
+  strict_mode: boolean;
+  auto_update: boolean;
+  updated_at: string;
+}
+
 function parseJsonArray(value: string | null | undefined): string[] {
   if (!value) {
     return [];
@@ -149,6 +169,19 @@ function parseJsonObject(value: string | null | undefined): Record<string, unkno
   } catch {
     return {};
   }
+}
+
+function parseSqliteBool(value: unknown): boolean {
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+  }
+
+  return Boolean(value);
 }
 
 function normalizeLimit(limit: number, fallback = 100, max = 500): number {
@@ -266,6 +299,27 @@ export class Database {
         FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS device_controls (
+        device_id TEXT PRIMARY KEY,
+        quarantine_enabled INTEGER NOT NULL DEFAULT 0,
+        kill_switch_enabled INTEGER NOT NULL DEFAULT 0,
+        reason TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS update_policies (
+        policy_id TEXT PRIMARY KEY,
+        pinned_version TEXT,
+        package_url TEXT,
+        sha256 TEXT,
+        size_bytes INTEGER,
+        revoked_versions_json TEXT NOT NULL DEFAULT '[]',
+        strict_mode INTEGER NOT NULL DEFAULT 0,
+        auto_update INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_command_logs_request_id ON command_logs(request_id);
       CREATE INDEX IF NOT EXISTS idx_command_logs_device_id ON command_logs(device_id);
       CREATE INDEX IF NOT EXISTS idx_command_logs_created_at ON command_logs(created_at DESC);
@@ -275,6 +329,8 @@ export class Database {
       CREATE INDEX IF NOT EXISTS idx_device_group_members_group_id ON device_group_members(group_id);
       CREATE INDEX IF NOT EXISTS idx_device_group_members_device_id ON device_group_members(device_id);
       CREATE INDEX IF NOT EXISTS idx_device_app_aliases_device_id ON device_app_aliases(device_id);
+      CREATE INDEX IF NOT EXISTS idx_device_controls_quarantine_enabled ON device_controls(quarantine_enabled);
+      CREATE INDEX IF NOT EXISTS idx_device_controls_kill_switch_enabled ON device_controls(kill_switch_enabled);
     `);
 
     this.ensureColumn("command_logs", "result_json", "TEXT");
@@ -1350,6 +1406,199 @@ export class Database {
 
     tx();
     return this.listDeviceAppAliases(deviceId);
+  }
+
+  public getDeviceControl(deviceId: string): DeviceControlRecord {
+    const row = this.db
+      .prepare(
+        "SELECT device_id, quarantine_enabled, kill_switch_enabled, reason, updated_at FROM device_controls WHERE device_id = ?",
+      )
+      .get(deviceId) as
+      | {
+          device_id: string;
+          quarantine_enabled: number | string;
+          kill_switch_enabled: number | string;
+          reason: string | null;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row) {
+      return {
+        device_id: deviceId,
+        quarantine_enabled: false,
+        kill_switch_enabled: false,
+        reason: null,
+        updated_at: "",
+      };
+    }
+
+    return {
+      device_id: row.device_id,
+      quarantine_enabled: parseSqliteBool(row.quarantine_enabled),
+      kill_switch_enabled: parseSqliteBool(row.kill_switch_enabled),
+      reason: row.reason,
+      updated_at: row.updated_at,
+    };
+  }
+
+  public upsertDeviceControl(input: {
+    deviceId: string;
+    quarantineEnabled: boolean;
+    killSwitchEnabled: boolean;
+    reason: string | null;
+  }): DeviceControlRecord {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `
+          INSERT INTO device_controls (
+            device_id,
+            quarantine_enabled,
+            kill_switch_enabled,
+            reason,
+            updated_at
+          ) VALUES (
+            @device_id,
+            @quarantine_enabled,
+            @kill_switch_enabled,
+            @reason,
+            @updated_at
+          )
+          ON CONFLICT(device_id) DO UPDATE SET
+            quarantine_enabled = excluded.quarantine_enabled,
+            kill_switch_enabled = excluded.kill_switch_enabled,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at
+        `,
+      )
+      .run({
+        device_id: input.deviceId,
+        quarantine_enabled: input.quarantineEnabled ? 1 : 0,
+        kill_switch_enabled: input.killSwitchEnabled ? 1 : 0,
+        reason: input.reason,
+        updated_at: now,
+      });
+
+    return this.getDeviceControl(input.deviceId);
+  }
+
+  public getUpdatePolicy(): UpdatePolicyRecord {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            policy_id,
+            pinned_version,
+            package_url,
+            sha256,
+            size_bytes,
+            revoked_versions_json,
+            strict_mode,
+            auto_update,
+            updated_at
+          FROM update_policies
+          WHERE policy_id = 'global'
+        `,
+      )
+      .get() as
+      | {
+          policy_id: string;
+          pinned_version: string | null;
+          package_url: string | null;
+          sha256: string | null;
+          size_bytes: number | null;
+          revoked_versions_json: string | null;
+          strict_mode: number | string;
+          auto_update: number | string;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row) {
+      return {
+        policy_id: "global",
+        pinned_version: null,
+        package_url: null,
+        sha256: null,
+        size_bytes: null,
+        revoked_versions: [],
+        strict_mode: false,
+        auto_update: false,
+        updated_at: "",
+      };
+    }
+
+    return {
+      policy_id: row.policy_id,
+      pinned_version: row.pinned_version,
+      package_url: row.package_url,
+      sha256: row.sha256,
+      size_bytes: row.size_bytes,
+      revoked_versions: parseJsonArray(row.revoked_versions_json),
+      strict_mode: parseSqliteBool(row.strict_mode),
+      auto_update: parseSqliteBool(row.auto_update),
+      updated_at: row.updated_at,
+    };
+  }
+
+  public upsertUpdatePolicy(input: {
+    pinnedVersion: string | null;
+    packageUrl: string | null;
+    sha256: string | null;
+    sizeBytes: number | null;
+    revokedVersions: string[];
+    strictMode: boolean;
+    autoUpdate: boolean;
+  }): UpdatePolicyRecord {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `
+          INSERT INTO update_policies (
+            policy_id,
+            pinned_version,
+            package_url,
+            sha256,
+            size_bytes,
+            revoked_versions_json,
+            strict_mode,
+            auto_update,
+            updated_at
+          ) VALUES (
+            'global',
+            @pinned_version,
+            @package_url,
+            @sha256,
+            @size_bytes,
+            @revoked_versions_json,
+            @strict_mode,
+            @auto_update,
+            @updated_at
+          )
+          ON CONFLICT(policy_id) DO UPDATE SET
+            pinned_version = excluded.pinned_version,
+            package_url = excluded.package_url,
+            sha256 = excluded.sha256,
+            size_bytes = excluded.size_bytes,
+            revoked_versions_json = excluded.revoked_versions_json,
+            strict_mode = excluded.strict_mode,
+            auto_update = excluded.auto_update,
+            updated_at = excluded.updated_at
+        `,
+      )
+      .run({
+        pinned_version: input.pinnedVersion,
+        package_url: input.packageUrl,
+        sha256: input.sha256,
+        size_bytes: input.sizeBytes,
+        revoked_versions_json: JSON.stringify(input.revokedVersions),
+        strict_mode: input.strictMode ? 1 : 0,
+        auto_update: input.autoUpdate ? 1 : 0,
+        updated_at: now,
+      });
+
+    return this.getUpdatePolicy();
   }
 
   public healthSnapshot(): {

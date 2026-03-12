@@ -65,6 +65,14 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
 
     return DateFormatter.cordyceps.string(from: date)
   }
+
+  var agentVersionLabel: String {
+    let normalized = version?.trimmed ?? ""
+    if normalized.isEmpty {
+      return "unknown"
+    }
+    return normalized
+  }
 }
 
 struct DevicesResponse: Decodable {
@@ -121,6 +129,33 @@ struct GroupResponse: Decodable {
 struct DeviceResponse: Decodable {
   let ok: Bool
   let device: DeviceRecord?
+  let message: String?
+  let error_code: String?
+}
+
+struct DeviceControlRecord: Decodable, Hashable {
+  let device_id: String
+  let quarantine_enabled: Bool
+  let kill_switch_enabled: Bool
+  let reason: String?
+  let updated_at: String
+}
+
+struct DeviceLockdownResult: Decodable, Hashable {
+  let attempted: Bool
+  let command_type: String
+  let lockdown_minutes: Int?
+  let ok: Bool
+  let message: String
+  let error_code: String?
+}
+
+struct DeviceControlResponse: Decodable {
+  let ok: Bool
+  let device_id: String?
+  let control: DeviceControlRecord?
+  let lockdown: DeviceLockdownResult?
+  let disconnected: Bool?
   let message: String?
   let error_code: String?
 }
@@ -251,6 +286,15 @@ struct DeviceAppAliasUpsertEntry: Encodable {
 
 struct DeviceAppAliasesUpsertRequest: Encodable {
   let aliases: [DeviceAppAliasUpsertEntry]
+}
+
+struct DeviceControlRequest: Encodable {
+  let quarantine_enabled: Bool?
+  let kill_switch_enabled: Bool?
+  let reason: String?
+  let enforce_lockdown: Bool?
+  let trigger_lockdown: Bool?
+  let lockdown_minutes: Int?
 }
 
 struct GroupUpsertRequest: Encodable {
@@ -404,7 +448,6 @@ enum CommandLibrary {
     .init(value: "open snipping tool", label: "open snipping tool", category: "Apps", keywords: ["snippingtool", "screenshot"]),
     .init(value: "lock", label: "lock", category: "Power", keywords: ["lock pc"]),
     .init(value: "lock pc", label: "lock pc", category: "Power", keywords: ["lock"]),
-    .init(value: "panic confirm", label: "panic confirm", category: "Emergency", keywords: ["lockdown confirm", "emergency confirm", "isolate"]),
     .init(value: "display off", label: "display off", category: "Power", keywords: ["screen off", "monitor off"]),
     .init(value: "screen off", label: "screen off", category: "Power", keywords: ["display off", "monitor off"]),
     .init(value: "monitor off", label: "monitor off", category: "Power", keywords: ["display off", "screen off"]),
@@ -501,11 +544,6 @@ enum CommandLibrary {
     "open command prompt": "open cmd",
     "open mspaint": "open paint",
     "lock pc": "lock",
-    "panic confirmed": "panic confirm",
-    "panic mode confirm": "panic confirm",
-    "lockdown confirm": "panic confirm",
-    "emergency confirm": "panic confirm",
-    "emergency mode confirm": "panic confirm",
     "sleep pc": "sleep",
     "shut down": "shutdown",
     "shutdown pc": "shutdown",
@@ -528,7 +566,6 @@ enum CommandLibrary {
     "sign out",
     "log out",
     "logout",
-    "panic confirm",
   ]
 
   static let quickActions: [String] = [

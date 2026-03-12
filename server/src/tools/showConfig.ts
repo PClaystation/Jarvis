@@ -56,6 +56,7 @@ const output = {
   update_metadata_timeout_ms: config.updateMetadataTimeoutMs,
   update_max_package_bytes: config.updateMaxPackageBytes,
   enforce_https_update_url: config.enforceHttpsUpdateUrl,
+  allow_automatic_updates: config.allowAutomaticUpdates,
   pwa_url: publicOrigin ? `${publicOrigin}/app` : null,
   pwa_pairing_url: publicOrigin
     ? `${publicOrigin}/app#${pairingFragment}`

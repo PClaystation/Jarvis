@@ -108,6 +108,34 @@ enum CordycepsClient {
     )
   }
 
+  static func sendDeviceControl(
+    config: ConnectionConfig,
+    deviceID: String,
+    quarantineEnabled: Bool? = nil,
+    killSwitchEnabled: Bool? = nil,
+    reason: String? = nil,
+    enforceLockdown: Bool? = nil,
+    triggerLockdown: Bool? = nil,
+    lockdownMinutes: Int? = nil
+  ) async throws -> APIResponse<DeviceControlResponse> {
+    let payload = DeviceControlRequest(
+      quarantine_enabled: quarantineEnabled,
+      kill_switch_enabled: killSwitchEnabled,
+      reason: reason,
+      enforce_lockdown: enforceLockdown,
+      trigger_lockdown: triggerLockdown,
+      lockdown_minutes: lockdownMinutes
+    )
+
+    return try await execute(
+      config: config,
+      path: "/api/devices/\(deviceID)/control",
+      method: "POST",
+      body: payload,
+      responseType: DeviceControlResponse.self
+    )
+  }
+
   static func loadDeviceAppAliases(
     config: ConnectionConfig,
     deviceID: String

@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { extractBearerToken, constantTimeEqual } from "../auth/auth";
 import type { AppConfig } from "../config/env";
-import type { Database } from "../db/database";
+import type { Database, UpdatePolicyRecord } from "../db/database";
 import { EventHub, type RealtimeEvent } from "../events/eventHub";
 import { parseExternalCommand } from "../parser/commandParser";
 import { DeviceRegistry } from "../realtime/deviceRegistry";
@@ -17,6 +17,9 @@ import {
   prepareDesignationChange,
   type PreparedDesignationChange,
 } from "../update/designation";
+import { queuePolicyUpdate } from "../update/policyQueue";
+import { evaluateVersionPolicy, hasManagedPolicyPackage } from "../update/versionPolicy";
+import type { QueuedUpdateDispatcher } from "../update/queuedUpdateDispatcher";
 
 interface ApiDeps {
   config: AppConfig;
@@ -24,6 +27,7 @@ interface ApiDeps {
   registry: DeviceRegistry;
   router: CommandRouter;
   eventHub: EventHub;
+  queuedUpdateDispatcher: QueuedUpdateDispatcher;
 }
 
 interface CommandRequestBody {
@@ -71,6 +75,25 @@ interface DeviceAppAliasesBody {
   }>;
 }
 
+interface DeviceControlBody {
+  quarantine_enabled?: unknown;
+  kill_switch_enabled?: unknown;
+  reason?: unknown;
+  enforce_lockdown?: unknown;
+  trigger_lockdown?: unknown;
+  lockdown_minutes?: unknown;
+}
+
+interface UpdatePolicyBody {
+  pinned_version?: unknown;
+  revoked_versions?: unknown;
+  strict_mode?: unknown;
+  auto_update?: unknown;
+  package_url?: unknown;
+  sha256?: unknown;
+  size_bytes?: unknown;
+}
+
 interface CreateApiKeyBody {
   name?: string;
   scopes?: string[];
@@ -108,6 +131,11 @@ const MAX_GROUP_ID_LEN = 32;
 const MAX_GROUP_DISPLAY_NAME_LEN = 80;
 const MAX_GROUP_DESCRIPTION_LEN = 240;
 const MAX_GROUP_MEMBER_COUNT = 100;
+const MAX_DEVICE_CONTROL_REASON_LEN = 240;
+const DEFAULT_LOCKDOWN_MINUTES = 30;
+const MIN_LOCKDOWN_MINUTES = 1;
+const MAX_LOCKDOWN_MINUTES = 240;
+const MAX_REVOKED_VERSIONS = 100;
 const DEFAULT_HISTORY_LIMIT = 100;
 const MAX_HISTORY_LIMIT = 500;
 const MAX_SSE_TOKEN_LENGTH = 512;
@@ -116,6 +144,7 @@ const JSON_CONTENT_TYPE_RE = /^\s*application\/(?:[a-z0-9.+-]+\+)?json\s*(?:;|$)
 const GROUP_COMMAND_PATH_RE = /^\/api\/groups\/[^/]+\/command$/;
 const GROUP_UPSERT_PATH_RE = /^\/api\/groups\/[^/]+$/;
 const DEVICE_RENAME_PATH_RE = /^\/api\/devices\/[^/]+\/display-name$/;
+const DEVICE_CONTROL_PATH_RE = /^\/api\/devices\/[^/]+\/control$/;
 
 interface RateLimitRule {
   id: string;
@@ -179,6 +208,8 @@ const BULK_GROUP_ALLOWED_TYPES = new Set([
   "CLIPBOARD_SET",
   "SYSTEM_DISPLAY_OFF",
 ]);
+
+const QUARANTINE_ALLOWED_TYPES = new Set(["PING", "LOCK_PC", "EMERGENCY_LOCKDOWN"]);
 
 const ADMIN_ONLY_COMMANDS = new Set([
   "ADMIN_EXEC_CMD",
@@ -309,7 +340,12 @@ function resolveRateLimitRule(method: string, path: string): RateLimitRule | nul
   }
 
   if (
-    (method === "POST" && (path === "/api/command" || path === "/api/update" || GROUP_COMMAND_PATH_RE.test(path)))
+    (method === "POST" &&
+      (path === "/api/command" ||
+        path === "/api/update" ||
+        GROUP_COMMAND_PATH_RE.test(path) ||
+        DEVICE_CONTROL_PATH_RE.test(path))) ||
+    (method === "PUT" && path === "/api/update/policy")
   ) {
     return RATE_LIMIT_RULES.dispatch;
   }
@@ -334,6 +370,10 @@ function requiresJsonBody(method: string, path: string): boolean {
     return true;
   }
 
+  if (method === "PUT" && path === "/api/update/policy") {
+    return true;
+  }
+
   if (method !== "POST") {
     return false;
   }
@@ -355,6 +395,10 @@ function requiresJsonBody(method: string, path: string): boolean {
   }
 
   if (DEVICE_RENAME_PATH_RE.test(path)) {
+    return true;
+  }
+
+  if (DEVICE_CONTROL_PATH_RE.test(path)) {
     return true;
   }
 
@@ -760,6 +804,39 @@ function parseDispatchError(error: unknown): { code: string; message: string; ht
   }
 }
 
+function preflightPolicyFailure(input: {
+  deviceId: string;
+  commandType: string;
+  quarantineEnabled: boolean;
+  killSwitchEnabled: boolean;
+  policy: UpdatePolicyRecord;
+  version: string | null | undefined;
+}): { code: string; message: string } | null {
+  if (input.killSwitchEnabled) {
+    return {
+      code: "DEVICE_KILL_SWITCHED",
+      message: `${input.deviceId} is blocked by kill-switch policy`,
+    };
+  }
+
+  if (input.quarantineEnabled && !QUARANTINE_ALLOWED_TYPES.has(input.commandType)) {
+    return {
+      code: "DEVICE_QUARANTINED",
+      message: `${input.deviceId} is quarantined`,
+    };
+  }
+
+  const versionPolicy = evaluateVersionPolicy(input.version, input.policy);
+  if (input.policy.strict_mode && versionPolicy.requiresUpdate) {
+    return {
+      code: versionPolicy.code ?? "VERSION_POLICY_BLOCKED",
+      message: versionPolicy.message ?? `${input.deviceId} is blocked by update policy`,
+    };
+  }
+
+  return null;
+}
+
 function parsePackageInspectionFailure(error: unknown): { code: string; message: string; httpStatus: number } {
   if (!(error instanceof PackageInspectionError)) {
     const message = error instanceof Error ? error.message : "Failed to inspect package URL";
@@ -820,6 +897,22 @@ function asDeviceAppAliasesBody(body: unknown): DeviceAppAliasesBody {
   }
 
   return body as DeviceAppAliasesBody;
+}
+
+function asDeviceControlBody(body: unknown): DeviceControlBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as DeviceControlBody;
+}
+
+function asUpdatePolicyBody(body: unknown): UpdatePolicyBody {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+
+  return body as UpdatePolicyBody;
 }
 
 function normalizeUpdateTarget(candidate: unknown): string {
@@ -926,6 +1019,23 @@ function normalizeBoolean(value: unknown): boolean {
   return false;
 }
 
+function normalizeOptionalLockdownMinutes(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) {
+    return null;
+  }
+
+  if (parsed < MIN_LOCKDOWN_MINUTES || parsed > MAX_LOCKDOWN_MINUTES) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
 function makeUpdateRawText(target: string, version: string, packageUrl: string): string {
   return `${target} update ${version} ${packageUrl}`;
 }
@@ -937,6 +1047,50 @@ function normalizeOptionalText(value: unknown, maxLength: number): string | unde
   }
 
   return normalized.slice(0, maxLength);
+}
+
+function normalizeOptionalVersion(value: unknown): string | null {
+  const normalized = asTrimmedString(value);
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeRevokedVersions(value: unknown): string[] | null {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const version = asTrimmedString(item);
+    if (!version || seen.has(version)) {
+      continue;
+    }
+
+    if (!isValidUpdateVersion(version)) {
+      return null;
+    }
+
+    seen.add(version);
+    output.push(version);
+    if (output.length >= MAX_REVOKED_VERSIONS) {
+      break;
+    }
+  }
+
+  return output;
+}
+
+function hasOwnField(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
 }
 
 function normalizeCapabilities(value: unknown): string[] {
@@ -1331,7 +1485,15 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       return;
     }
 
-    const devices = deps.db.listDevices().map((device) => withProfile(device));
+    const devices = deps.db.listDevices().map((device) => {
+      const control = deps.db.getDeviceControl(device.device_id);
+      return {
+        ...withProfile(device),
+        quarantine_enabled: control.quarantine_enabled,
+        kill_switch_enabled: control.kill_switch_enabled,
+        quarantine_reason: control.reason,
+      };
+    });
 
     return {
       ok: true,
@@ -1370,6 +1532,173 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       ok: true,
       device: updated ? withProfile(updated) : null,
       message: displayName ? `Saved name for ${deviceId}` : `Cleared name for ${deviceId}`,
+    });
+  });
+
+  server.post("/api/devices/:deviceId/control", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["devices:write"])) {
+      return;
+    }
+
+    const params = request.params as { deviceId?: string } | undefined;
+    const deviceId = asTrimmedString(params?.deviceId).toLowerCase();
+    if (!deviceId || !/^[a-z0-9_-]{2,32}$/.test(deviceId)) {
+      reply.code(400).send({
+        ok: false,
+        message: "device_id must be 2-32 chars and use a-z, 0-9, _ or -",
+        error_code: "INVALID_DEVICE_ID",
+      });
+      return;
+    }
+
+    const known = deps.db.getDevice(deviceId) ?? deps.registry.get(deviceId);
+    if (!known) {
+      reply.code(404).send({
+        ok: false,
+        message: `Unknown device: ${deviceId}`,
+        error_code: "UNKNOWN_DEVICE",
+      });
+      return;
+    }
+
+    const body = asDeviceControlBody(request.body);
+    const hasQuarantineField = hasOwnField(body, "quarantine_enabled");
+    const hasKillSwitchField = hasOwnField(body, "kill_switch_enabled");
+    const hasEnforceLockdownField = hasOwnField(body, "enforce_lockdown");
+    const hasTriggerLockdownField = hasOwnField(body, "trigger_lockdown");
+    const hasLockdownMinutesField = hasOwnField(body, "lockdown_minutes");
+    if (
+      !hasQuarantineField &&
+      !hasKillSwitchField &&
+      !hasOwnField(body, "reason") &&
+      !hasEnforceLockdownField &&
+      !hasTriggerLockdownField &&
+      !hasLockdownMinutesField
+    ) {
+      reply.code(400).send({
+        ok: false,
+        message:
+          "Provide at least one of quarantine_enabled, kill_switch_enabled, reason, enforce_lockdown, trigger_lockdown, or lockdown_minutes",
+        error_code: "INVALID_CONTROL_UPDATE",
+      });
+      return;
+    }
+
+    const parsedLockdownMinutes = normalizeOptionalLockdownMinutes(body.lockdown_minutes);
+    if (hasLockdownMinutesField && parsedLockdownMinutes === null) {
+      reply.code(400).send({
+        ok: false,
+        message: `lockdown_minutes must be an integer between ${MIN_LOCKDOWN_MINUTES} and ${MAX_LOCKDOWN_MINUTES}`,
+        error_code: "INVALID_LOCKDOWN_MINUTES",
+      });
+      return;
+    }
+
+    const lockdownMinutes = parsedLockdownMinutes ?? DEFAULT_LOCKDOWN_MINUTES;
+
+    const current = deps.db.getDeviceControl(deviceId);
+    let quarantineEnabled = hasQuarantineField ? normalizeBoolean(body.quarantine_enabled) : current.quarantine_enabled;
+    let killSwitchEnabled = hasKillSwitchField ? normalizeBoolean(body.kill_switch_enabled) : current.kill_switch_enabled;
+    if (killSwitchEnabled) {
+      quarantineEnabled = true;
+    }
+
+    if (!quarantineEnabled) {
+      killSwitchEnabled = false;
+    }
+
+    const hasReasonField = hasOwnField(body, "reason");
+    const requestedReason = normalizeOptionalText(body.reason, MAX_DEVICE_CONTROL_REASON_LEN) ?? null;
+    const reason = quarantineEnabled
+      ? hasReasonField
+        ? requestedReason
+        : current.reason
+      : null;
+
+    const control = deps.db.upsertDeviceControl({
+      deviceId,
+      quarantineEnabled,
+      killSwitchEnabled,
+      reason,
+    });
+
+    const connected = deps.registry.get(deviceId);
+    const requestedLockdown = hasTriggerLockdownField ? normalizeBoolean(body.trigger_lockdown) : false;
+    const enforcedLockdown = hasEnforceLockdownField ? normalizeBoolean(body.enforce_lockdown) : false;
+    const shouldLockdown = Boolean(connected && (requestedLockdown || enforcedLockdown));
+
+    let lockdownResult:
+      | {
+          attempted: boolean;
+          command_type: string;
+          lockdown_minutes: number | null;
+          ok: boolean;
+          message: string;
+          error_code?: string;
+        }
+      | null = null;
+
+    if (shouldLockdown && connected) {
+      const commandType = connected.capabilities.includes("emergency_lockdown") ? "EMERGENCY_LOCKDOWN" : "LOCK_PC";
+      const requestId = makeRequestId();
+      const commandArgs =
+        commandType === "EMERGENCY_LOCKDOWN"
+          ? {
+              rollback_minutes: lockdownMinutes,
+            }
+          : {};
+      try {
+        const result = await deps.router.dispatchToDevice({
+          requestId,
+          deviceId,
+          command: {
+            type: commandType,
+            args: commandArgs,
+          },
+          timeoutMs: timeoutForCommand(deps.config, commandType),
+        });
+
+        lockdownResult = {
+          attempted: true,
+          command_type: commandType,
+          lockdown_minutes: commandType === "EMERGENCY_LOCKDOWN" ? lockdownMinutes : null,
+          ok: result.ok,
+          message: result.message,
+          error_code: result.error_code,
+        };
+      } catch (error) {
+        const dispatch = parseDispatchError(error);
+        lockdownResult = {
+          attempted: true,
+          command_type: commandType,
+          lockdown_minutes: commandType === "EMERGENCY_LOCKDOWN" ? lockdownMinutes : null,
+          ok: false,
+          message: dispatch.message,
+          error_code: dispatch.code,
+        };
+      }
+    }
+
+    const disconnected = killSwitchEnabled
+      ? deps.registry.forceDisconnect(deviceId, 4008, "Kill-switch policy enabled")
+      : false;
+
+    if (disconnected) {
+      deps.db.markDeviceOffline(deviceId);
+      deps.router.clearDevicePending(deviceId);
+      deps.eventHub.publish("device_status", {
+        device_id: deviceId,
+        status: "offline",
+        reason: "kill_switch",
+      });
+    }
+
+    reply.send({
+      ok: true,
+      device_id: deviceId,
+      control,
+      lockdown: lockdownResult,
+      disconnected,
     });
   });
 
@@ -1749,6 +2078,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     }
 
     const requiredCapability = requiredCapabilityForCommand(parsedCommand.type);
+    const updatePolicy = deps.db.getUpdatePolicy();
     const dispatchableDeviceIds: string[] = [];
     const preflightResults: CommandDispatchResult[] = [];
 
@@ -1761,6 +2091,27 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           ok: false,
           message: `${deviceId} is offline`,
           error_code: "DEVICE_OFFLINE",
+          completed_at: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      const control = deps.db.getDeviceControl(deviceId);
+      const policyFailure = preflightPolicyFailure({
+        deviceId,
+        commandType: parsedCommand.type,
+        quarantineEnabled: control.quarantine_enabled,
+        killSwitchEnabled: control.kill_switch_enabled,
+        policy: updatePolicy,
+        version: connected.version,
+      });
+      if (policyFailure) {
+        preflightResults.push({
+          request_id: requestId,
+          device_id: deviceId,
+          ok: false,
+          message: policyFailure.message,
+          error_code: policyFailure.code,
           completed_at: new Date().toISOString(),
         });
         continue;
@@ -2005,6 +2356,224 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
       device_token: token,
       ws_url: deps.config.publicWsUrl,
       message: "Enrollment complete",
+    });
+  });
+
+  server.get("/api/update/policy", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["updates:execute"])) {
+      return;
+    }
+
+    const policy = deps.db.getUpdatePolicy();
+    reply.send({
+      ok: true,
+      policy: {
+        ...policy,
+        auto_update: deps.config.allowAutomaticUpdates ? policy.auto_update : false,
+      },
+    });
+  });
+
+  server.put("/api/update/policy", async (request, reply) => {
+    if (!authorize(request, reply, deps, ["updates:execute"])) {
+      return;
+    }
+
+    const current = deps.db.getUpdatePolicy();
+    const body = asUpdatePolicyBody(request.body);
+
+    const hasPinnedVersion = hasOwnField(body, "pinned_version");
+    let pinnedVersion = hasPinnedVersion ? normalizeOptionalVersion(body.pinned_version) : current.pinned_version;
+    if (pinnedVersion && !isValidUpdateVersion(pinnedVersion)) {
+      reply.code(400).send({
+        ok: false,
+        message: "pinned_version must match [A-Za-z0-9._-] and be at most 64 chars",
+        error_code: "INVALID_UPDATE_VERSION",
+      });
+      return;
+    }
+
+    const hasRevokedVersions = hasOwnField(body, "revoked_versions");
+    let revokedVersions = hasRevokedVersions ? normalizeRevokedVersions(body.revoked_versions) : current.revoked_versions;
+    if (!revokedVersions) {
+      reply.code(400).send({
+        ok: false,
+        message: "revoked_versions must be an array of valid version strings",
+        error_code: "INVALID_REVOKED_VERSIONS",
+      });
+      return;
+    }
+
+    const hasStrictMode = hasOwnField(body, "strict_mode");
+    const strictMode = hasStrictMode ? normalizeBoolean(body.strict_mode) : current.strict_mode;
+    const hasAutoUpdate = hasOwnField(body, "auto_update");
+    const requestedAutoUpdate = hasAutoUpdate ? normalizeBoolean(body.auto_update) : current.auto_update;
+    const autoUpdate = deps.config.allowAutomaticUpdates ? requestedAutoUpdate : false;
+
+    const hasPackageUrl = hasOwnField(body, "package_url");
+    const rawPackageUrl = asTrimmedString(body.package_url);
+    let packageUrl = hasPackageUrl
+      ? rawPackageUrl
+        ? normalizeUpdatePackageUrl(rawPackageUrl, deps.config.enforceHttpsUpdateUrl)
+        : null
+      : current.package_url;
+
+    if (hasPackageUrl && rawPackageUrl && !packageUrl) {
+      reply.code(400).send({
+        ok: false,
+        message: deps.config.enforceHttpsUpdateUrl
+          ? "package_url must be a valid https URL"
+          : "package_url must be a valid http/https URL",
+        error_code: "INVALID_UPDATE_URL",
+      });
+      return;
+    }
+
+    const hasSha = hasOwnField(body, "sha256");
+    const rawSha = asTrimmedString(body.sha256).toLowerCase();
+    let sha256 = hasSha ? (rawSha ? rawSha : null) : current.sha256;
+    if (sha256 && !isValidSha256(sha256)) {
+      reply.code(400).send({
+        ok: false,
+        message: "sha256 must be a 64-character lowercase or uppercase hex string",
+        error_code: "INVALID_SHA256",
+      });
+      return;
+    }
+
+    const hasSizeBytes = hasOwnField(body, "size_bytes");
+    let sizeBytes = hasSizeBytes
+      ? normalizeOptionalSizeBytes(body.size_bytes, deps.config.updateMaxPackageBytes)
+      : current.size_bytes;
+
+    if (
+      hasSizeBytes &&
+      body.size_bytes !== undefined &&
+      body.size_bytes !== null &&
+      body.size_bytes !== "" &&
+      sizeBytes === null
+    ) {
+      reply.code(400).send({
+        ok: false,
+        message: `size_bytes must be a positive integer <= ${deps.config.updateMaxPackageBytes}`,
+        error_code: "INVALID_UPDATE_SIZE",
+      });
+      return;
+    }
+
+    if (!packageUrl) {
+      sha256 = null;
+      sizeBytes = null;
+    }
+
+    if (packageUrl && !sha256) {
+      try {
+        const inspected = await inspectPackageFromUrl({
+          url: packageUrl,
+          timeoutMs: deps.config.updateMetadataTimeoutMs,
+          maxBytes: deps.config.updateMaxPackageBytes,
+          requireHttps: deps.config.enforceHttpsUpdateUrl,
+        });
+
+        sha256 = inspected.sha256;
+        packageUrl = inspected.finalUrl;
+        if (!sizeBytes) {
+          sizeBytes = inspected.sizeBytes;
+        }
+      } catch (error) {
+        const failure = parsePackageInspectionFailure(error);
+        reply.code(failure.httpStatus).send({
+          ok: false,
+          message: failure.message,
+          error_code: failure.code,
+        });
+        return;
+      }
+    }
+
+    const policyActive = Boolean(pinnedVersion) || revokedVersions.length > 0;
+    if (autoUpdate && policyActive) {
+      if (!pinnedVersion) {
+        reply.code(400).send({
+          ok: false,
+          message: "pinned_version is required when auto_update is enabled",
+          error_code: "PINNED_VERSION_REQUIRED",
+        });
+        return;
+      }
+
+      if (!packageUrl || !sha256) {
+        reply.code(400).send({
+          ok: false,
+          message: "package_url and sha256 are required when auto_update is enabled",
+          error_code: "POLICY_PACKAGE_REQUIRED",
+        });
+        return;
+      }
+    }
+
+    const saved = deps.db.upsertUpdatePolicy({
+      pinnedVersion,
+      packageUrl,
+      sha256,
+      sizeBytes,
+      revokedVersions,
+      strictMode,
+      autoUpdate,
+    });
+
+    const queuedUpdates: string[] = [];
+    if (deps.config.allowAutomaticUpdates && saved.auto_update && hasManagedPolicyPackage(saved)) {
+      for (const deviceId of deps.registry.listOnlineDeviceIds()) {
+        const connected = deps.registry.get(deviceId);
+        if (!connected) {
+          continue;
+        }
+
+        const versionGate = evaluateVersionPolicy(connected.version, saved);
+        if (!versionGate.requiresUpdate) {
+          continue;
+        }
+
+        if (!connected.capabilities.includes("updater")) {
+          continue;
+        }
+
+        const queued = queuePolicyUpdate({
+          db: deps.db,
+          deviceId,
+          source: "server-policy",
+          policy: saved,
+        });
+
+        if (!queued.queued || !queued.requestId || !saved.pinned_version || !saved.package_url) {
+          continue;
+        }
+
+        queuedUpdates.push(deviceId);
+        publishCommandLogEvent(deps, {
+          requestId: queued.requestId,
+          deviceId,
+          source: "server-policy",
+          rawText: makeUpdateRawText(deviceId, saved.pinned_version, saved.package_url),
+          parsedTarget: deviceId,
+          parsedType: "AGENT_UPDATE",
+          status: "queued",
+          message: null,
+        });
+
+        void deps.queuedUpdateDispatcher.kick(deviceId);
+      }
+    }
+
+    reply.send({
+      ok: true,
+      policy: {
+        ...saved,
+        auto_update: deps.config.allowAutomaticUpdates ? saved.auto_update : false,
+      },
+      queued_updates: queuedUpdates,
+      auto_update_enabled: deps.config.allowAutomaticUpdates,
     });
   });
 
@@ -2575,6 +3144,7 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
     }
 
     const requiredCapability = requiredCapabilityForCommand(parsed.command.type);
+    const updatePolicy = deps.db.getUpdatePolicy();
     const dispatchableDeviceIds: string[] = [];
     const preflightResults: CommandDispatchResult[] = [];
 
@@ -2621,6 +3191,37 @@ export async function registerApiRoutes(server: FastifyInstance, deps: ApiDeps):
           request_id: requestId,
           message: `${deviceId} is offline`,
           error_code: "DEVICE_OFFLINE",
+        });
+        return;
+      }
+
+      const control = deps.db.getDeviceControl(deviceId);
+      const policyFailure = preflightPolicyFailure({
+        deviceId,
+        commandType: parsed.command.type,
+        quarantineEnabled: control.quarantine_enabled,
+        killSwitchEnabled: control.kill_switch_enabled,
+        policy: updatePolicy,
+        version: connected.version,
+      });
+      if (policyFailure) {
+        if (parsed.target === "all") {
+          preflightResults.push({
+            request_id: requestId,
+            device_id: deviceId,
+            ok: false,
+            message: policyFailure.message,
+            error_code: policyFailure.code,
+            completed_at: new Date().toISOString(),
+          });
+          continue;
+        }
+
+        reply.code(409).send({
+          ok: false,
+          request_id: requestId,
+          message: policyFailure.message,
+          error_code: policyFailure.code,
         });
         return;
       }

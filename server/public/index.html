@@ -93,6 +93,32 @@
       </section>
 
       <section class="panel">
+        <h2>Security Controls</h2>
+        <p class="muted">Dedicated controls for lockdown, quarantine, and kill-switch actions.</p>
+        <div class="danger-zone">
+          <strong>Danger Zone</strong>
+          <p>These actions can isolate the target immediately. Verify device ID and reason before applying.</p>
+        </div>
+        <label for="securityDeviceInput">Security Target Device</label>
+        <input id="securityDeviceInput" type="text" placeholder="t1" />
+        <label for="securityReasonInput">Reason (optional)</label>
+        <input id="securityReasonInput" type="text" placeholder="User requested lockdown" />
+        <label for="securityLockdownMinutesInput">Lockdown Minutes (1-240)</label>
+        <input id="securityLockdownMinutesInput" type="number" min="1" max="240" step="1" value="30" />
+        <div class="row">
+          <button id="securityLockdownBtn" type="button" class="primary">Trigger Lockdown</button>
+          <button id="securityQuarantineBtn" type="button">Quarantine</button>
+        </div>
+        <div class="row">
+          <button id="securityUnquarantineBtn" type="button">Lift Quarantine</button>
+          <button id="securityKillSwitchOnBtn" type="button">Enable Kill-Switch</button>
+        </div>
+        <div class="row">
+          <button id="securityKillSwitchOffBtn" type="button">Disable Kill-Switch</button>
+        </div>
+      </section>
+
+      <section class="panel">
         <h2>Admin Command</h2>
         <div class="danger-zone">
           <strong>Danger Zone</strong>

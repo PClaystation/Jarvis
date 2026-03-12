@@ -43,6 +43,14 @@ const adminTargetInput = document.getElementById("adminTargetInput");
 const adminShellSelect = document.getElementById("adminShellSelect");
 const adminCommandInput = document.getElementById("adminCommandInput");
 const sendAdminCommandBtn = document.getElementById("sendAdminCommandBtn");
+const securityDeviceInput = document.getElementById("securityDeviceInput");
+const securityReasonInput = document.getElementById("securityReasonInput");
+const securityLockdownMinutesInput = document.getElementById("securityLockdownMinutesInput");
+const securityLockdownBtn = document.getElementById("securityLockdownBtn");
+const securityQuarantineBtn = document.getElementById("securityQuarantineBtn");
+const securityUnquarantineBtn = document.getElementById("securityUnquarantineBtn");
+const securityKillSwitchOnBtn = document.getElementById("securityKillSwitchOnBtn");
+const securityKillSwitchOffBtn = document.getElementById("securityKillSwitchOffBtn");
 
 const groupIdInput = document.getElementById("groupIdInput");
 const groupDisplayNameInput = document.getElementById("groupDisplayNameInput");
@@ -77,6 +85,9 @@ const UPDATE_SIZE_KEY = "cordyceps_update_size";
 const UPDATE_QUEUE_OFFLINE_KEY = "cordyceps_update_queue_offline";
 const ADMIN_TARGET_KEY = "cordyceps_admin_target";
 const ADMIN_SHELL_KEY = "cordyceps_admin_shell";
+const SECURITY_DEVICE_KEY = "cordyceps_security_device";
+const SECURITY_REASON_KEY = "cordyceps_security_reason";
+const SECURITY_LOCKDOWN_MINUTES_KEY = "cordyceps_security_lockdown_minutes";
 const LAST_COMMAND_SUCCESS_KEY = "cordyceps_last_command_success";
 const BOOTSTRAP_COMMAND_KEY = "cordyceps_bootstrap_command";
 const BOOTSTRAP_ACTION_KEY = "cordyceps_bootstrap_action";
@@ -85,6 +96,10 @@ const LAST_ACTION_KEY = "cordyceps_last_action";
 const ALIAS_DEVICE_KEY = "cordyceps_alias_device";
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 const GROUP_TARGET_RE = /^group:([a-z][a-z0-9_-]{1,31})$/;
+const DEVICE_ID_RE = /^[a-z][a-z0-9_-]{1,31}$/;
+const LOCKDOWN_MINUTES_DEFAULT = 30;
+const LOCKDOWN_MINUTES_MIN = 1;
+const LOCKDOWN_MINUTES_MAX = 240;
 
 const POLL_INTERVAL_MS = 300000;
 const EVENTS_RECONNECT_DELAY_MS = 4000;
@@ -160,7 +175,6 @@ const COMMAND_LIBRARY = [
   { value: "open snipping tool", label: "open snipping tool", category: "Apps", keywords: ["snippingtool", "screenshot"] },
   { value: "lock", label: "lock", category: "Power", keywords: ["lock pc"] },
   { value: "lock pc", label: "lock pc", category: "Power", keywords: ["lock"] },
-  { value: "panic confirm", label: "panic confirm", category: "Emergency", keywords: ["lockdown confirm", "emergency confirm", "isolate"] },
   { value: "display off", label: "display off", category: "Power", keywords: ["screen off", "monitor off"] },
   { value: "screen off", label: "screen off", category: "Power", keywords: ["display off", "monitor off"] },
   { value: "monitor off", label: "monitor off", category: "Power", keywords: ["display off", "screen off"] },
@@ -267,11 +281,6 @@ const ACTION_VALUE_ALIASES = new Map([
   ["open command prompt", "open cmd"],
   ["open mspaint", "open paint"],
   ["lock pc", "lock"],
-  ["panic confirmed", "panic confirm"],
-  ["panic mode confirm", "panic confirm"],
-  ["lockdown confirm", "panic confirm"],
-  ["emergency confirm", "panic confirm"],
-  ["emergency mode confirm", "panic confirm"],
   ["sleep pc", "sleep"],
   ["shut down", "shutdown"],
   ["shutdown pc", "shutdown"],
@@ -292,7 +301,6 @@ const DANGEROUS_ACTIONS = new Set([
   "sign out",
   "log out",
   "logout",
-  "panic confirm",
 ]);
 
 const ACTION_REQUIRED_CAPABILITY = new Map([
@@ -375,7 +383,6 @@ const ACTION_REQUIRED_CAPABILITY = new Map([
   ["sign out", "session_control"],
   ["log out", "session_control"],
   ["logout", "session_control"],
-  ["panic confirm", "emergency_lockdown"],
 ]);
 
 let pollTimer = null;
@@ -517,6 +524,25 @@ function canonicalActionValue(action) {
 function parseGroupTarget(value) {
   const match = normalizeActionText(value).match(GROUP_TARGET_RE);
   return match ? match[1] : "";
+}
+
+function normalizeDeviceId(value) {
+  const normalized = normalizeActionText(value);
+  return DEVICE_ID_RE.test(normalized) ? normalized : "";
+}
+
+function parseLockdownMinutes(value) {
+  const trimmed = (value || "").toString().trim();
+  if (!trimmed) {
+    return LOCKDOWN_MINUTES_DEFAULT;
+  }
+
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isInteger(parsed) || parsed < LOCKDOWN_MINUTES_MIN || parsed > LOCKDOWN_MINUTES_MAX) {
+    return null;
+  }
+
+  return parsed;
 }
 
 function toLocalTimestamp(isoTime) {
@@ -876,6 +902,48 @@ function persistAdminSettings() {
   localStorage.setItem(ADMIN_SHELL_KEY, normalizeAdminShell(adminShellSelect.value));
 }
 
+function persistSecuritySettings() {
+  if (!securityDeviceInput || !securityReasonInput || !securityLockdownMinutesInput) {
+    return;
+  }
+
+  const deviceId = normalizeDeviceId(securityDeviceInput.value);
+  const reason = (securityReasonInput.value || "").trim();
+  const minutesRaw = (securityLockdownMinutesInput.value || "").toString().trim();
+
+  if (deviceId) {
+    securityDeviceInput.value = deviceId;
+    localStorage.setItem(SECURITY_DEVICE_KEY, deviceId);
+  }
+
+  localStorage.setItem(SECURITY_REASON_KEY, reason);
+
+  if (minutesRaw) {
+    localStorage.setItem(SECURITY_LOCKDOWN_MINUTES_KEY, minutesRaw);
+  } else {
+    localStorage.setItem(SECURITY_LOCKDOWN_MINUTES_KEY, String(LOCKDOWN_MINUTES_DEFAULT));
+  }
+}
+
+function setSecurityControlsBusy(isBusy, busyLabel) {
+  const controls = [
+    securityLockdownBtn,
+    securityQuarantineBtn,
+    securityUnquarantineBtn,
+    securityKillSwitchOnBtn,
+    securityKillSwitchOffBtn,
+  ].filter(Boolean);
+
+  for (const button of controls) {
+    if (!button.dataset.defaultLabel) {
+      button.dataset.defaultLabel = button.textContent || "";
+    }
+
+    button.disabled = isBusy;
+    button.textContent = isBusy ? busyLabel : button.dataset.defaultLabel;
+  }
+}
+
 function updateDangerZone() {
   const action = normalizeActionText(actionSelect.value);
   const isGroup = Boolean(parseGroupTarget(targetInput.value));
@@ -897,6 +965,10 @@ function setTarget(deviceId) {
   if (aliasDeviceInput && !parseGroupTarget(deviceId) && deviceId !== "all") {
     aliasDeviceInput.value = deviceId;
     localStorage.setItem(ALIAS_DEVICE_KEY, deviceId);
+  }
+  if (securityDeviceInput && !parseGroupTarget(deviceId) && deviceId !== "all") {
+    securityDeviceInput.value = deviceId;
+    localStorage.setItem(SECURITY_DEVICE_KEY, deviceId);
   }
   refreshActionAvailability();
 }
@@ -1440,6 +1512,67 @@ async function createApiKey() {
   setResult(data, { latencyMs });
 }
 
+async function applySecurityControl(options = {}) {
+  if (!securityDeviceInput || !securityReasonInput || !securityLockdownMinutesInput) {
+    throw new Error("Security controls are not available in this app build.");
+  }
+
+  persistSecuritySettings();
+
+  const deviceId = normalizeDeviceId(securityDeviceInput.value);
+  if (!deviceId) {
+    throw new Error("Security target device ID is required.");
+  }
+
+  const reason = (securityReasonInput.value || "").trim();
+  let lockdownMinutes;
+  if (options.includeLockdownMinutes === true) {
+    lockdownMinutes = parseLockdownMinutes(securityLockdownMinutesInput.value);
+    if (lockdownMinutes == null) {
+      throw new Error(`Lockdown minutes must be an integer between ${LOCKDOWN_MINUTES_MIN} and ${LOCKDOWN_MINUTES_MAX}.`);
+    }
+  }
+
+  const payload = {
+    ...(typeof options.quarantineEnabled === "boolean" ? { quarantine_enabled: options.quarantineEnabled } : {}),
+    ...(typeof options.killSwitchEnabled === "boolean" ? { kill_switch_enabled: options.killSwitchEnabled } : {}),
+    ...(typeof options.enforceLockdown === "boolean" ? { enforce_lockdown: options.enforceLockdown } : {}),
+    ...(typeof options.triggerLockdown === "boolean" ? { trigger_lockdown: options.triggerLockdown } : {}),
+    ...(typeof lockdownMinutes === "number" ? { lockdown_minutes: lockdownMinutes } : {}),
+    ...(reason ? { reason } : {}),
+  };
+
+  setSecurityControlsBusy(true, "Applying...");
+  try {
+    const { data, latencyMs } = await apiRequest(`/api/devices/${encodeURIComponent(deviceId)}/control`, payload, { method: "POST" });
+    const lockdownFailed = data?.lockdown?.attempted === true && data?.lockdown?.ok === false;
+    const isError = data?.ok === false || lockdownFailed;
+    const message =
+      data?.message
+      || data?.lockdown?.message
+      || data?.error_code
+      || (isError ? "Security control failed." : "Security control applied.");
+
+    const resultPayload = typeof data === "object" && data ? { ...data, message } : { ok: !isError, message };
+    setResult(resultPayload, {
+      requestId: data?.device_id || deviceId,
+      latencyMs,
+      isError,
+    });
+
+    if (!isError) {
+      setLastCommandSuccess();
+    }
+
+    await Promise.allSettled([
+      loadDevices({ silent: true }),
+      loadHistory({ silent: true }),
+    ]);
+  } finally {
+    setSecurityControlsBusy(false, "");
+  }
+}
+
 function persistUpdateSettings() {
   if (
     !updateTargetInput ||
@@ -1943,6 +2076,14 @@ function init() {
     aliasDeviceInput.value = localStorage.getItem(ALIAS_DEVICE_KEY) || targetInput.value || "m1";
   }
 
+  if (securityDeviceInput && securityReasonInput && securityLockdownMinutesInput) {
+    const targetDevice = normalizeDeviceId(targetInput.value);
+    securityDeviceInput.value = localStorage.getItem(SECURITY_DEVICE_KEY) || targetDevice || "m1";
+    securityReasonInput.value = localStorage.getItem(SECURITY_REASON_KEY) || "";
+    securityLockdownMinutesInput.value = localStorage.getItem(SECURITY_LOCKDOWN_MINUTES_KEY) || String(LOCKDOWN_MINUTES_DEFAULT);
+    setSecurityControlsBusy(false, "");
+  }
+
   renderActionOptions("");
 
   const bootstrapAction = localStorage.getItem(BOOTSTRAP_ACTION_KEY);
@@ -1994,6 +2135,10 @@ function init() {
     if (aliasDeviceInput && !parseGroupTarget(targetInput.value) && normalizeActionText(targetInput.value) !== "all") {
       aliasDeviceInput.value = normalizeActionText(targetInput.value);
       localStorage.setItem(ALIAS_DEVICE_KEY, normalizeActionText(targetInput.value));
+    }
+    if (securityDeviceInput && !parseGroupTarget(targetInput.value) && normalizeActionText(targetInput.value) !== "all") {
+      securityDeviceInput.value = normalizeActionText(targetInput.value);
+      localStorage.setItem(SECURITY_DEVICE_KEY, normalizeActionText(targetInput.value));
     }
     if (updateTargetInput && !localStorage.getItem(UPDATE_TARGET_KEY) && updateTargetInput.value.trim() === "") {
       updateTargetInput.value = normalizeActionText(targetInput.value);
@@ -2224,6 +2369,98 @@ function init() {
     });
     updateQueueOfflineInput.addEventListener("change", () => {
       persistUpdateSettings();
+    });
+  }
+
+  if (
+    securityDeviceInput &&
+    securityReasonInput &&
+    securityLockdownMinutesInput &&
+    securityLockdownBtn &&
+    securityQuarantineBtn &&
+    securityUnquarantineBtn &&
+    securityKillSwitchOnBtn &&
+    securityKillSwitchOffBtn
+  ) {
+    securityDeviceInput.addEventListener("change", () => {
+      persistSecuritySettings();
+    });
+    securityReasonInput.addEventListener("change", () => {
+      persistSecuritySettings();
+    });
+    securityLockdownMinutesInput.addEventListener("change", () => {
+      persistSecuritySettings();
+    });
+
+    securityLockdownBtn.addEventListener("click", async () => {
+      try {
+        await applySecurityControl({
+          enforceLockdown: true,
+          triggerLockdown: true,
+          includeLockdownMinutes: true,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
+      }
+    });
+
+    securityQuarantineBtn.addEventListener("click", async () => {
+      try {
+        await applySecurityControl({
+          quarantineEnabled: true,
+          enforceLockdown: false,
+          triggerLockdown: false,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
+      }
+    });
+
+    securityUnquarantineBtn.addEventListener("click", async () => {
+      try {
+        await applySecurityControl({
+          quarantineEnabled: false,
+          killSwitchEnabled: false,
+          enforceLockdown: false,
+          triggerLockdown: false,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
+      }
+    });
+
+    securityKillSwitchOnBtn.addEventListener("click", async () => {
+      try {
+        await applySecurityControl({
+          killSwitchEnabled: true,
+          enforceLockdown: false,
+          triggerLockdown: false,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
+      }
+    });
+
+    securityKillSwitchOffBtn.addEventListener("click", async () => {
+      try {
+        await applySecurityControl({
+          killSwitchEnabled: false,
+          enforceLockdown: false,
+          triggerLockdown: false,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setAuthHint(message, true);
+        setResult(message, { isError: true });
+      }
     });
   }
 

@@ -19,6 +19,7 @@ struct ContentView: View {
             devicesCard
             groupsCard
             commandCard
+            securityCard
             adminCommandCard
             updateCard
             historyCard
@@ -384,11 +385,9 @@ struct ContentView: View {
         .font(.system(.caption2, design: .rounded))
         .foregroundStyle(Color.white.opacity(0.66))
 
-      if let version = device.version, !version.isEmpty {
-        Text("agent \(version)")
-          .font(.system(.caption2, design: .rounded).weight(.semibold))
-          .foregroundStyle(CordycepsTheme.capsuleAmber.opacity(0.95))
-      }
+      Text("agent \(device.agentVersionLabel)")
+        .font(.system(.caption2, design: .rounded).weight(.semibold))
+        .foregroundStyle(CordycepsTheme.capsuleAmber.opacity(0.95))
 
       if let capabilities = device.capabilities, !capabilities.isEmpty {
         Text(capabilities.prefix(3).joined(separator: ", "))
@@ -733,6 +732,65 @@ struct ContentView: View {
 
         actionButton("Run Admin Command", icon: "terminal.fill", role: .warning, loading: viewModel.isSendingAdminCommand) {
           Task { await viewModel.sendAdminCommand() }
+        }
+      }
+    }
+  }
+
+  private var securityCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("Security Controls")
+
+        Text("Run lockdown, quarantine, and kill-switch actions from this dedicated control section.")
+          .font(.system(.caption, design: .rounded))
+          .foregroundStyle(Color.white.opacity(0.72))
+
+        dangerZone("These controls can block connectivity and isolate a machine immediately. Confirm the target device before applying.")
+
+        TextField("Security target device ID (t1)", text: $viewModel.securityDeviceInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.securityDeviceInput) { _ in
+            viewModel.persistSecuritySettings()
+          }
+
+        TextField("Reason (optional)", text: $viewModel.securityReasonInput)
+          .textInputAutocapitalization(.sentences)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.securityReasonInput) { _ in
+            viewModel.persistSecuritySettings()
+          }
+
+        TextField("Lockdown minutes (1-240)", text: $viewModel.securityLockdownMinutesInput)
+          .keyboardType(.numberPad)
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.securityLockdownMinutesInput) { _ in
+            viewModel.persistSecuritySettings()
+          }
+
+        HStack(spacing: 8) {
+          actionButton("Trigger Lockdown", icon: "lock.shield.fill", role: .danger, loading: viewModel.isApplyingSecurityControl) {
+            Task { await viewModel.triggerLockdown() }
+          }
+          actionButton("Quarantine", icon: "shield.lefthalf.filled", role: .warning, loading: viewModel.isApplyingSecurityControl) {
+            Task { await viewModel.quarantineDevice() }
+          }
+        }
+
+        HStack(spacing: 8) {
+          actionButton("Lift Quarantine", icon: "shield.lefthalf.filled.slash", role: .normal, loading: viewModel.isApplyingSecurityControl) {
+            Task { await viewModel.unquarantineDevice() }
+          }
+          actionButton("Enable Kill-Switch", icon: "bolt.trianglebadge.exclamationmark.fill", role: .danger, loading: viewModel.isApplyingSecurityControl) {
+            Task { await viewModel.setKillSwitch(true) }
+          }
+        }
+
+        actionButton("Disable Kill-Switch", icon: "bolt.slash.fill", role: .normal, loading: viewModel.isApplyingSecurityControl) {
+          Task { await viewModel.setKillSwitch(false) }
         }
       }
     }

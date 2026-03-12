@@ -49,6 +49,17 @@ export class DeviceRegistry {
     this.devices.delete(deviceId);
   }
 
+  public forceDisconnect(deviceId: string, code = 4008, reason = "Disconnected by server policy"): boolean {
+    const entry = this.devices.get(deviceId);
+    if (!entry) {
+      return false;
+    }
+
+    this.devices.delete(deviceId);
+    closeSocketQuietly(entry.socket, code, reason);
+    return true;
+  }
+
   public markHeartbeat(deviceId: string): void {
     const entry = this.devices.get(deviceId);
     if (!entry) {

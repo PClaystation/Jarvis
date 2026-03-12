@@ -11,6 +11,8 @@ import { DeviceRegistry } from "./deviceRegistry";
 import { EventHub } from "../events/eventHub";
 import { log } from "../utils/logger";
 import type { QueuedUpdateDispatcher } from "../update/queuedUpdateDispatcher";
+import { queuePolicyUpdate } from "../update/policyQueue";
+import { evaluateVersionPolicy, hasManagedPolicyPackage } from "../update/versionPolicy";
 
 interface RealtimeDeps {
   db: Database;
@@ -21,6 +23,7 @@ interface RealtimeDeps {
   wsAuthTimeoutMs: number;
   wsPingIntervalMs: number;
   wsMaxMessageBytes: number;
+  allowAutomaticUpdates: boolean;
 }
 
 interface WsLike {
@@ -174,6 +177,10 @@ function normalizeOptionalObject(value: unknown): Record<string, unknown> | null
   }
 
   return value as Record<string, unknown>;
+}
+
+function makeUpdateRawText(deviceId: string, version: string, packageUrl: string): string {
+  return `${deviceId} update ${version} ${packageUrl}`;
 }
 
 function normalizeCapabilities(value: unknown): string[] | null {
@@ -359,6 +366,26 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
             return;
           }
 
+          const deviceControl = deps.db.getDeviceControl(hello.device_id);
+          if (deviceControl.kill_switch_enabled) {
+            closeQuietly(socket, 4008, "Kill-switch policy enabled");
+            return;
+          }
+
+          const updatePolicy = deps.db.getUpdatePolicy();
+          const versionGate = evaluateVersionPolicy(hello.version, updatePolicy);
+          const canAutoUpdate =
+            versionGate.requiresUpdate &&
+            deps.allowAutomaticUpdates &&
+            updatePolicy.auto_update &&
+            hasManagedPolicyPackage(updatePolicy) &&
+            hello.capabilities.includes("updater");
+
+          if (versionGate.requiresUpdate && updatePolicy.strict_mode && !canAutoUpdate) {
+            closeQuietly(socket, 4006, versionGate.message ?? "Version blocked by server policy");
+            return;
+          }
+
           authenticated = true;
           activeDeviceId = hello.device_id;
           clearTimeout(authTimer);
@@ -395,6 +422,38 @@ export async function registerRealtime(server: FastifyInstance, deps: RealtimeDe
           });
 
           deps.queuedUpdateDispatcher.kick(hello.device_id);
+
+          if (canAutoUpdate) {
+            const queued = queuePolicyUpdate({
+              db: deps.db,
+              deviceId: hello.device_id,
+              source: "server-policy",
+              policy: updatePolicy,
+            });
+
+            if (
+              queued.queued &&
+              queued.requestId &&
+              updatePolicy.pinned_version &&
+              updatePolicy.package_url
+            ) {
+              deps.eventHub.publish("command_log", {
+                request_id: queued.requestId,
+                device_id: hello.device_id,
+                source: "server-policy",
+                raw_text: makeUpdateRawText(hello.device_id, updatePolicy.pinned_version, updatePolicy.package_url),
+                parsed_target: hello.device_id,
+                parsed_type: "AGENT_UPDATE",
+                status: "queued",
+                message: null,
+                result_payload: null,
+                error_code: null,
+                ts: new Date().toISOString(),
+              });
+            }
+
+            deps.queuedUpdateDispatcher.kick(hello.device_id);
+          }
 
           pingTimer = setInterval(() => {
             if (!isSocketOpen(socket)) {

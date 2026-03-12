@@ -11,6 +11,7 @@ import { DeviceRegistry } from "../src/realtime/deviceRegistry";
 import { EventHub } from "../src/events/eventHub";
 import { sha256Hex } from "../src/utils/crypto";
 import type { CommandRouter } from "../src/router/commandRouter";
+import type { QueuedUpdateDispatcher } from "../src/update/queuedUpdateDispatcher";
 
 class MockSocket {
   public readyState = 1;
@@ -94,7 +95,15 @@ class FakeRouter {
   }
 }
 
-function makeConfig(): AppConfig {
+class FakeQueuedUpdateDispatcher {
+  public kicked: string[] = [];
+
+  public async kick(deviceId: string): Promise<void> {
+    this.kicked.push(deviceId);
+  }
+}
+
+function makeConfig(overrides?: Partial<AppConfig>): AppConfig {
   return {
     host: "127.0.0.1",
     port: 0,
@@ -118,9 +127,11 @@ function makeConfig(): AppConfig {
     updateMetadataTimeoutMs: 10_000,
     updateMaxPackageBytes: 10_000_000,
     enforceHttpsUpdateUrl: false,
+    allowAutomaticUpdates: false,
     corsAllowedOrigins: ["*"],
     publicWsUrl: "ws://localhost/ws/agent",
     pwaPublicUrl: "http://localhost/app",
+    ...overrides,
   };
 }
 
@@ -129,11 +140,12 @@ function makeTempDbPath(): string {
   return path.join(os.tmpdir(), `cordyceps-routes-test-${suffix}.db`);
 }
 
-async function createHarness() {
+async function createHarness(options?: { configOverrides?: Partial<AppConfig> }) {
   const sqlitePath = makeTempDbPath();
   const db = new Database(sqlitePath);
   const registry = new DeviceRegistry();
   const router = new FakeRouter();
+  const queuedUpdateDispatcher = new FakeQueuedUpdateDispatcher();
   const eventHub = new EventHub();
 
   db.enrollDevice({
@@ -165,11 +177,12 @@ async function createHarness() {
 
   const server = Fastify({ logger: false });
   await registerApiRoutes(server, {
-    config: makeConfig(),
+    config: makeConfig(options?.configOverrides),
     db,
     registry,
     router: router as unknown as CommandRouter,
     eventHub,
+    queuedUpdateDispatcher: queuedUpdateDispatcher as unknown as QueuedUpdateDispatcher,
   });
 
   const cleanup = async () => {
@@ -182,7 +195,7 @@ async function createHarness() {
     }
   };
 
-  return { server, db, registry, router, cleanup };
+  return { server, db, registry, router, queuedUpdateDispatcher, cleanup };
 }
 
 function addOnlineDevice(
@@ -778,6 +791,292 @@ test("devices endpoint includes derived agent profile", async () => {
 
     const m1 = devices.find((device) => device.device_id === "m1");
     assert.equal(m1?.profile, "legacy");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("quarantine policy blocks non-emergency commands", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const quarantine = await server.inject({
+      method: "POST",
+      url: "/api/devices/m1/control",
+      headers: authHeaders("owner-token"),
+      payload: {
+        quarantine_enabled: true,
+        reason: "investigation",
+      },
+    });
+
+    assert.equal(quarantine.statusCode, 200);
+    assert.equal(quarantine.json().control.quarantine_enabled, true);
+
+    const blocked = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 notify hello",
+      },
+    });
+
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().error_code, "DEVICE_QUARANTINED");
+
+    const allowed = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 ping",
+      },
+    });
+
+    assert.equal(allowed.statusCode, 200);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("kill-switch policy disconnects active device", async () => {
+  const harness = await createHarness();
+  const { server, registry, cleanup } = harness;
+
+  try {
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/devices/m1/control",
+      headers: authHeaders("owner-token"),
+      payload: {
+        kill_switch_enabled: true,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.control.kill_switch_enabled, true);
+    assert.equal(body.disconnected, true);
+    assert.equal(registry.get("m1"), null);
+
+    const commandAfterKillSwitch = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 ping",
+      },
+    });
+
+    assert.equal(commandAfterKillSwitch.statusCode, 409);
+    assert.equal(commandAfterKillSwitch.json().error_code, "DEVICE_OFFLINE");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("device control lockdown forwards rollback minutes to emergency-capable agents", async () => {
+  const harness = await createHarness();
+  const { server, router, cleanup } = harness;
+
+  try {
+    addOnlineDevice(harness, {
+      deviceId: "se1",
+      capabilities: [
+        "profile_se",
+        "media_control",
+        "locking",
+        "open_app",
+        "notifications",
+        "clipboard_control",
+        "display_control",
+        "updater",
+        "emergency_lockdown",
+      ],
+    });
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/devices/se1/control",
+      headers: authHeaders("owner-token"),
+      payload: {
+        trigger_lockdown: true,
+        lockdown_minutes: 45,
+        reason: "operator request",
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.lockdown.command_type, "EMERGENCY_LOCKDOWN");
+    assert.equal(body.lockdown.lockdown_minutes, 45);
+    assert.equal(
+      router.dispatchedToDevice.some(
+        (item) => item.deviceId === "se1" && item.type === "EMERGENCY_LOCKDOWN" && item.args.rollback_minutes === 45,
+      ),
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("device control rejects lockdown minutes outside allowed range", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const response = await server.inject({
+      method: "POST",
+      url: "/api/devices/m1/control",
+      headers: authHeaders("owner-token"),
+      payload: {
+        trigger_lockdown: true,
+        lockdown_minutes: 0,
+      },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error_code, "INVALID_LOCKDOWN_MINUTES");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("strict pinned version policy blocks command dispatch for stale agent", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const policy = await server.inject({
+      method: "PUT",
+      url: "/api/update/policy",
+      headers: authHeaders("owner-token"),
+      payload: {
+        pinned_version: "2.0.0",
+        strict_mode: true,
+        auto_update: false,
+      },
+    });
+
+    assert.equal(policy.statusCode, 200);
+    assert.equal(policy.json().policy.pinned_version, "2.0.0");
+
+    const command = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 ping",
+      },
+    });
+
+    assert.equal(command.statusCode, 409);
+    assert.equal(command.json().error_code, "VERSION_PINNED_UPDATE_REQUIRED");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("auto-update policy queues update for online outdated devices", async () => {
+  const harness = await createHarness({
+    configOverrides: {
+      allowAutomaticUpdates: true,
+    },
+  });
+  const { server, db, queuedUpdateDispatcher, cleanup } = harness;
+
+  try {
+    const policy = await server.inject({
+      method: "PUT",
+      url: "/api/update/policy",
+      headers: authHeaders("owner-token"),
+      payload: {
+        pinned_version: "2.0.0",
+        strict_mode: true,
+        auto_update: true,
+        package_url: "https://example.com/agent-v2.exe",
+        sha256: "a".repeat(64),
+      },
+    });
+
+    assert.equal(policy.statusCode, 200);
+    const body = policy.json();
+    assert.equal(body.ok, true);
+    assert.equal(Array.isArray(body.queued_updates), true);
+    assert.equal(body.queued_updates.includes("m1"), true);
+
+    const queued = db.listQueuedUpdatesForDevice("m1");
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0]?.version, "2.0.0");
+    assert.equal(queuedUpdateDispatcher.kicked.includes("m1"), true);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("auto-update remains disabled by default for operator safety", async () => {
+  const harness = await createHarness();
+  const { server, db, cleanup } = harness;
+
+  try {
+    const policy = await server.inject({
+      method: "PUT",
+      url: "/api/update/policy",
+      headers: authHeaders("owner-token"),
+      payload: {
+        pinned_version: "2.0.0",
+        strict_mode: true,
+        auto_update: true,
+        package_url: "https://example.com/agent-v2.exe",
+        sha256: "a".repeat(64),
+      },
+    });
+
+    assert.equal(policy.statusCode, 200);
+    const body = policy.json();
+    assert.equal(body.policy.auto_update, false);
+    assert.equal(body.auto_update_enabled, false);
+    assert.equal(Array.isArray(body.queued_updates), true);
+    assert.equal(body.queued_updates.length, 0);
+    assert.equal(db.listQueuedUpdatesForDevice("m1").length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("revoked version policy blocks stale device immediately", async () => {
+  const harness = await createHarness();
+  const { server, cleanup } = harness;
+
+  try {
+    const policy = await server.inject({
+      method: "PUT",
+      url: "/api/update/policy",
+      headers: authHeaders("owner-token"),
+      payload: {
+        revoked_versions: ["1.0.0"],
+        strict_mode: true,
+        auto_update: false,
+      },
+    });
+
+    assert.equal(policy.statusCode, 200);
+
+    const command = await server.inject({
+      method: "POST",
+      url: "/api/command",
+      headers: authHeaders("owner-token"),
+      payload: {
+        text: "m1 ping",
+      },
+    });
+
+    assert.equal(command.statusCode, 409);
+    assert.equal(command.json().error_code, "VERSION_REVOKED");
   } finally {
     await cleanup();
   }

@@ -17,6 +17,9 @@ final class RemoteViewModel: ObservableObject {
     static let updateSha = "cordyceps.ios.updateSha"
     static let updateSize = "cordyceps.ios.updateSize"
     static let updateQueueOffline = "cordyceps.ios.updateQueueOffline"
+    static let securityDevice = "cordyceps.ios.securityDevice"
+    static let securityReason = "cordyceps.ios.securityReason"
+    static let securityLockdownMinutes = "cordyceps.ios.securityLockdownMinutes"
     static let adminTarget = "cordyceps.ios.adminTarget"
     static let adminShell = "cordyceps.ios.adminShell"
     static let lastSuccess = "cordyceps.ios.lastSuccess"
@@ -53,6 +56,9 @@ final class RemoteViewModel: ObservableObject {
   @Published var updateShaInput: String
   @Published var updateSizeInput: String
   @Published var updateQueueOfflineInput: Bool
+  @Published var securityDeviceInput: String
+  @Published var securityReasonInput: String
+  @Published var securityLockdownMinutesInput: String
 
   @Published var pairingLinkInput = ""
   @Published var deviceSearchInput = ""
@@ -86,6 +92,7 @@ final class RemoteViewModel: ObservableObject {
   @Published var isTestingToken = false
   @Published var isSendingCommand = false
   @Published var isPushingUpdate = false
+  @Published var isApplyingSecurityControl = false
 
   @Published var connectionState: ConnectionState
   @Published var statusText = "Set API base URL and PHONE_API_TOKEN, then load devices."
@@ -114,6 +121,7 @@ final class RemoteViewModel: ObservableObject {
     let initialTarget = defaults.string(forKey: DefaultsKey.target) ?? "m1"
     let initialRenameDevice = defaults.string(forKey: DefaultsKey.renameDevice) ?? initialTarget
     let initialAliasDevice = defaults.string(forKey: DefaultsKey.aliasDevice) ?? initialTarget
+    let initialSecurityDevice = defaults.string(forKey: DefaultsKey.securityDevice) ?? initialTarget
     let initialAdminTarget = defaults.string(forKey: DefaultsKey.adminTarget) ?? "a1"
     let initialAdminShell = Self.normalizeAdminShellValue(defaults.string(forKey: DefaultsKey.adminShell) ?? "cmd")
     let rememberedAction = defaults.string(forKey: DefaultsKey.lastAction) ?? "ping"
@@ -148,6 +156,9 @@ final class RemoteViewModel: ObservableObject {
     updateShaInput = defaults.string(forKey: DefaultsKey.updateSha) ?? ""
     updateSizeInput = defaults.string(forKey: DefaultsKey.updateSize) ?? ""
     updateQueueOfflineInput = initialQueueOffline
+    securityDeviceInput = defaults.string(forKey: DefaultsKey.securityDevice) ?? initialSecurityDevice
+    securityReasonInput = defaults.string(forKey: DefaultsKey.securityReason) ?? ""
+    securityLockdownMinutesInput = defaults.string(forKey: DefaultsKey.securityLockdownMinutes) ?? "30"
     recentCommands = []
 
     connectionState = initialToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .disconnected : .retrying
@@ -347,6 +358,21 @@ final class RemoteViewModel: ObservableObject {
     defaults.set(sha, forKey: DefaultsKey.updateSha)
     defaults.set(size, forKey: DefaultsKey.updateSize)
     defaults.set(updateQueueOfflineInput, forKey: DefaultsKey.updateQueueOffline)
+  }
+
+  func persistSecuritySettings() {
+    let device = normalizeDeviceID(securityDeviceInput)
+    let reason = securityReasonInput.trimmed
+    let minutes = securityLockdownMinutesInput.trimmed
+
+    if !device.isEmpty {
+      securityDeviceInput = device
+      defaults.set(device, forKey: DefaultsKey.securityDevice)
+    }
+    securityReasonInput = reason
+    securityLockdownMinutesInput = minutes
+    defaults.set(reason, forKey: DefaultsKey.securityReason)
+    defaults.set(minutes, forKey: DefaultsKey.securityLockdownMinutes)
   }
 
   func persistAdminSettings() {
@@ -1113,6 +1139,131 @@ final class RemoteViewModel: ObservableObject {
     }
   }
 
+  func triggerLockdown() async {
+    await applySecurityControl(
+      quarantineEnabled: nil,
+      killSwitchEnabled: nil,
+      enforceLockdown: true,
+      triggerLockdown: true,
+      includeLockdownMinutes: true
+    )
+  }
+
+  func quarantineDevice() async {
+    await applySecurityControl(
+      quarantineEnabled: true,
+      killSwitchEnabled: nil,
+      enforceLockdown: false,
+      triggerLockdown: false,
+      includeLockdownMinutes: false
+    )
+  }
+
+  func unquarantineDevice() async {
+    await applySecurityControl(
+      quarantineEnabled: false,
+      killSwitchEnabled: false,
+      enforceLockdown: false,
+      triggerLockdown: false,
+      includeLockdownMinutes: false
+    )
+  }
+
+  func setKillSwitch(_ enabled: Bool) async {
+    await applySecurityControl(
+      quarantineEnabled: nil,
+      killSwitchEnabled: enabled,
+      enforceLockdown: false,
+      triggerLockdown: false,
+      includeLockdownMinutes: false
+    )
+  }
+
+  private func applySecurityControl(
+    quarantineEnabled: Bool?,
+    killSwitchEnabled: Bool?,
+    enforceLockdown: Bool,
+    triggerLockdown: Bool,
+    includeLockdownMinutes: Bool
+  ) async {
+    guard !isApplyingSecurityControl else {
+      return
+    }
+
+    persistSecuritySettings()
+
+    let deviceID = normalizeDeviceID(securityDeviceInput)
+    guard !deviceID.isEmpty else {
+      setStatus("Security target device ID is required.", isError: true)
+      setResult(message: "Security target device ID is required.", rawBody: "Security target device ID is required.", isError: true)
+      return
+    }
+
+    let reason = securityReasonInput.trimmed
+    let lockdownMinutes: Int?
+    if includeLockdownMinutes {
+      guard let parsed = parseLockdownMinutes(securityLockdownMinutesInput) else {
+        setStatus("Lockdown minutes must be an integer between 1 and 240.", isError: true)
+        setResult(
+          message: "Lockdown minutes must be an integer between 1 and 240.",
+          rawBody: "Lockdown minutes must be an integer between 1 and 240.",
+          isError: true
+        )
+        return
+      }
+      lockdownMinutes = parsed
+    } else {
+      lockdownMinutes = nil
+    }
+
+    isApplyingSecurityControl = true
+    defer { isApplyingSecurityControl = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.sendDeviceControl(
+        config: config,
+        deviceID: deviceID,
+        quarantineEnabled: quarantineEnabled,
+        killSwitchEnabled: killSwitchEnabled,
+        reason: reason.isEmpty ? nil : reason,
+        enforceLockdown: enforceLockdown,
+        triggerLockdown: triggerLockdown,
+        lockdownMinutes: lockdownMinutes
+      )
+
+      connectionState = .connected
+      let lockdownFailed = response.body.lockdown?.attempted == true && response.body.lockdown?.ok == false
+      let isError = response.body.ok == false || lockdownFailed
+      let message =
+        response.body.message ??
+        response.body.lockdown?.message ??
+        response.body.error_code ??
+        (isError ? "Security control failed." : "Security control applied.")
+
+      if isError {
+        triggerFeedback(.error)
+      } else {
+        setLastCommandSuccess()
+        triggerFeedback(.success)
+      }
+
+      setStatus(message, isError: isError)
+      setResult(
+        message: message,
+        rawBody: response.rawJSON,
+        requestID: response.body.device_id ?? deviceID,
+        latencyMs: response.latencyMs,
+        isError: isError
+      )
+
+      await loadDevices(silent: true, fromPolling: false)
+      await loadCommandLogs(silent: true, append: false)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
   func pastePairingLinkFromClipboard() {
     if let copied = UIPasteboard.general.string, !copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       pairingLinkInput = copied
@@ -1576,10 +1727,6 @@ final class RemoteViewModel: ObservableObject {
       return "session_control"
     }
 
-    if ["panic confirm"].contains(normalized) {
-      return "emergency_lockdown"
-    }
-
     return ""
   }
 
@@ -1708,8 +1855,10 @@ final class RemoteViewModel: ObservableObject {
 
     renameDeviceInput = singleDevice
     aliasDeviceInput = singleDevice
+    securityDeviceInput = singleDevice
     defaults.set(singleDevice, forKey: DefaultsKey.renameDevice)
     defaults.set(singleDevice, forKey: DefaultsKey.aliasDevice)
+    defaults.set(singleDevice, forKey: DefaultsKey.securityDevice)
   }
 
   private func isValidTarget(_ value: String) -> Bool {
@@ -1718,6 +1867,19 @@ final class RemoteViewModel: ObservableObject {
 
   private func isValidSHA256(_ value: String) -> Bool {
     value.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil
+  }
+
+  private func parseLockdownMinutes(_ value: String) -> Int? {
+    let trimmed = value.trimmed
+    if trimmed.isEmpty {
+      return 30
+    }
+
+    guard let parsed = Int(trimmed), (1 ... 240).contains(parsed) else {
+      return nil
+    }
+
+    return parsed
   }
 
   private func isValidAbsoluteUpdateURL(_ value: String) -> Bool {

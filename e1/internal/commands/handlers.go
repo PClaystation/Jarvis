@@ -20,7 +20,9 @@ import (
 const commandTimeout = 8 * time.Second
 const emergencyCommandTimeout = 20 * time.Second
 const emergencyCooldown = 60 * time.Second
-const emergencyRollbackMinutes = 30
+const defaultEmergencyRollbackMinutes = 30
+const minEmergencyRollbackMinutes = 1
+const maxEmergencyRollbackMinutes = 240
 const maxClipboardTextLength = 1000
 const emergencyActiveCommandGrace = 5 * time.Second
 
@@ -448,12 +450,23 @@ func Execute(deviceID string, version string, command protocol.CommandEnvelope) 
 		result.Message = "Agent removal scheduled"
 		return result
 	case "EMERGENCY_LOCKDOWN":
-		if err := emergencyLockdown(command.RequestID); err != nil {
+		rollbackMinutes, err := readOptionalIntArg(
+			command.Args,
+			"rollback_minutes",
+			defaultEmergencyRollbackMinutes,
+			minEmergencyRollbackMinutes,
+			maxEmergencyRollbackMinutes,
+		)
+		if err != nil {
+			return handleErr(err, "INVALID_ARGS")
+		}
+
+		if err := emergencyLockdown(command.RequestID, rollbackMinutes); err != nil {
 			return handleErr(err, "EMERGENCY_FAILED")
 		}
 
 		result.OK = true
-		result.Message = fmt.Sprintf("Emergency lockdown executed: network blocked with %d-minute failsafe rollback, sync stopped, apps closed, workstation locked", emergencyRollbackMinutes)
+		result.Message = fmt.Sprintf("Emergency lockdown executed: network blocked with %d-minute failsafe rollback, sync stopped, apps closed, workstation locked", rollbackMinutes)
 		return result
 	default:
 		return handleErr(fmt.Errorf("unknown command type: %s", command.Type), "UNKNOWN_TYPE")
@@ -905,7 +918,7 @@ func removalConfigPaths() []string {
 	return paths
 }
 
-func emergencyLockdown(requestID string) error {
+func emergencyLockdown(requestID string, rollbackMinutes int) error {
 	if runtime.GOOS != "windows" {
 		return errors.New("EMERGENCY_LOCKDOWN is supported only on Windows")
 	}
@@ -917,7 +930,7 @@ func emergencyLockdown(requestID string) error {
 
 	writeEmergencyAudit(requestID, "started")
 
-	rollbackSeconds := emergencyRollbackMinutes * 60
+	rollbackSeconds := rollbackMinutes * 60
 	statePath, err := emergencyStatusPath()
 	if err != nil {
 		writeEmergencyAudit(requestID, fmt.Sprintf("failed:resolve-state-path:%v", err))

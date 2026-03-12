@@ -217,6 +217,7 @@ async function main(): Promise<void> {
     registry,
     router,
     eventHub,
+    queuedUpdateDispatcher,
   });
 
   await registerRealtime(server, {
@@ -228,6 +229,7 @@ async function main(): Promise<void> {
     wsAuthTimeoutMs: config.wsAuthTimeoutMs,
     wsPingIntervalMs: config.wsPingIntervalMs,
     wsMaxMessageBytes: config.wsMaxMessageBytes,
+    allowAutomaticUpdates: config.allowAutomaticUpdates,
   });
 
   const heartbeatSweepTimer = setInterval(() => {
@@ -273,6 +275,7 @@ async function main(): Promise<void> {
     update_metadata_timeout_ms: config.updateMetadataTimeoutMs,
     update_max_package_bytes: config.updateMaxPackageBytes,
     enforce_https_update_url: config.enforceHttpsUpdateUrl,
+    allow_automatic_updates: config.allowAutomaticUpdates,
     cors_allowed_origins: config.corsAllowedOrigins,
     phone_token_source: config.phoneApiTokenSource,
     bootstrap_token_source: config.agentBootstrapTokenSource,

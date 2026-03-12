@@ -294,6 +294,7 @@ export interface AppConfig {
   updateMetadataTimeoutMs: number;
   updateMaxPackageBytes: number;
   enforceHttpsUpdateUrl: boolean;
+  allowAutomaticUpdates: boolean;
   corsAllowedOrigins: string[];
   publicWsUrl: string;
   pwaPublicUrl: string;
@@ -324,6 +325,7 @@ export function loadConfig(): AppConfig {
   const updateMetadataTimeoutMs = readInt("UPDATE_METADATA_TIMEOUT_MS", 120000);
   const updateMaxPackageBytes = readInt("UPDATE_MAX_PACKAGE_BYTES", 314572800);
   const enforceHttpsUpdateUrl = readBool("ENFORCE_HTTPS_UPDATE_URL", true);
+  const allowAutomaticUpdates = readBool("ALLOW_AUTOMATIC_UPDATES", false);
   const corsAllowedOrigins = readCsv("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ALLOWED_ORIGINS);
   const publicWsUrl = process.env.PUBLIC_WS_URL ?? `ws://localhost:${port}/ws/agent`;
   const pwaPublicUrl = process.env.PWA_PUBLIC_URL ?? DEFAULT_PWA_PUBLIC_URL;
@@ -351,6 +353,7 @@ export function loadConfig(): AppConfig {
     updateMetadataTimeoutMs,
     updateMaxPackageBytes,
     enforceHttpsUpdateUrl,
+    allowAutomaticUpdates,
     corsAllowedOrigins,
     publicWsUrl,
     pwaPublicUrl,
