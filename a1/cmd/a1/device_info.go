@@ -221,6 +221,7 @@ func collectWindowsDeviceInfo() map[string]any {
 		"-Command",
 		windowsDeviceInfoScript,
 	)
+	configureHiddenProcess(command)
 
 	output, err := command.Output()
 	if err != nil {
