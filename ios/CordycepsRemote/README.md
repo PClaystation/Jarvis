@@ -14,16 +14,27 @@ Native SwiftUI field client for directing Cordyceps nodes from iPhone.
 - Device list auto-refresh every 30 seconds while app is active
 - Device search and online-only filter
 - Select target from device cards
+- Device inspector parity with the web app:
+  - Full record/realtime snapshot (`GET /api/devices/:id`)
+  - Capabilities, aliases, queued updates, and recent commands
+  - Delete stale/offline device record (`DELETE /api/devices/:id`)
 - Build/send typed commands through `POST /api/command`
 - Recent command history chips (reuse and clear)
 - Voice dictation for command text (`Speak`)
 - Pairing-link import (paste `pwa_pairing_url` / external pairing URL and auto-fill settings)
 - Send update payloads through `POST /api/update`
+- Update parity fields:
+  - Signature key ID + detached signature
+  - Optional privileged helper split toggle
 - Rich result panel:
   - status
   - request ID
   - latency
   - server message + raw JSON
+- API key lifecycle parity:
+  - list/create/revoke
+  - rotate key (and capture one-time rotated token value)
+- Owner token rotation controls (`/api/auth/tokens/rotate`) with grace-window input and response payload view
 - Persist connection/action/update defaults and recent command history in local storage
 
 ## Requirements

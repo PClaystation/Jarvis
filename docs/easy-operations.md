@@ -64,6 +64,19 @@ That embeds:
 - whether first launch should detach into the background
 - whether startup persistence should be registered
 
+USB builds now also embed Windows file metadata, an application manifest, and the project icon by default without changing agent behavior.
+If you have a code-signing certificate, you can sign the EXE during the same build:
+
+```powershell
+.\ops\cordyceps.ps1 -Action build-usb -Strain t -ServerUrl "https://your-server.example" -BootstrapToken "YOUR_BOOTSTRAP_TOKEN" -CodeSigningThumbprint "ABCDEF1234567890" -TimestampUrl "http://timestamp.digicert.com"
+```
+
+You can also sign from a PFX file:
+
+```powershell
+.\ops\cordyceps.ps1 -Action build-usb -Strain t -ServerUrl "https://your-server.example" -BootstrapToken "YOUR_BOOTSTRAP_TOKEN" -CodeSigningPfxPath "C:\signing\cordyceps.pfx" -CodeSigningPfxPassword "YOUR_PFX_PASSWORD" -TimestampUrl "http://timestamp.digicert.com"
+```
+
 ## 5) Install/start an agent on a Windows host
 
 Run on the target Windows device:
@@ -114,4 +127,5 @@ It prints all supported actions and examples.
   - run `status` to check installed/running state
 - Build failed:
   - install Go 1.23+
+  - for Authenticode signing, install `signtool.exe` from the Windows SDK
   - rerun `build-usb` with the same command and inspect the first error line

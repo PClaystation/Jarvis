@@ -22,6 +22,7 @@ release/release-manifest.json
 agent/dist/
 */dist/
 *-agent-usb.exe
+/pesticide/pesticide
 
 # Editor/OS
 .DS_Store

@@ -21,6 +21,8 @@ If you want the fastest operator workflow, use the shortcuts below from repo roo
 3. Build/install/manage Windows agents with one wrapper:
    - `.\ops\cordyceps.ps1 -Action help`
 
+USB builds now embed Windows file metadata and a manifest automatically, and can optionally Authenticode-sign the output via `-CodeSigningThumbprint` or `-CodeSigningPfxPath`.
+
 Simple copy/paste operation guide: [docs/easy-operations.md](docs/easy-operations.md)
 
 ## Current Colony Capabilities

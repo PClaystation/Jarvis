@@ -102,9 +102,37 @@ enum CordycepsClient {
     return try await execute(
       config: config,
       path: "/api/devices/\(deviceID)/display-name",
-      method: "PUT",
+      method: "POST",
       body: payload,
       responseType: DeviceResponse.self
+    )
+  }
+
+  static func loadDeviceInspector(
+    config: ConnectionConfig,
+    deviceID: String,
+    logsLimit: Int = 40
+  ) async throws -> APIResponse<DeviceInspectorResponse> {
+    let limit = max(1, min(logsLimit, 100))
+    return try await execute(
+      config: config,
+      path: "/api/devices/\(deviceID)?logs_limit=\(limit)",
+      method: "GET",
+      body: Optional<CommandRequest>.none,
+      responseType: DeviceInspectorResponse.self
+    )
+  }
+
+  static func deleteDeviceRecord(
+    config: ConnectionConfig,
+    deviceID: String
+  ) async throws -> APIResponse<DeviceDeleteResponse> {
+    try await execute(
+      config: config,
+      path: "/api/devices/\(deviceID)",
+      method: "DELETE",
+      body: Optional<CommandRequest>.none,
+      responseType: DeviceDeleteResponse.self
     )
   }
 
@@ -235,6 +263,36 @@ enum CordycepsClient {
     )
   }
 
+  static func rotateAPIKey(config: ConnectionConfig, keyID: String) async throws -> APIResponse<APIKeyRotateResponse> {
+    try await execute(
+      config: config,
+      path: "/api/auth/keys/\(keyID)/rotate",
+      method: "POST",
+      body: Optional<CommandRequest>.none,
+      responseType: APIKeyRotateResponse.self
+    )
+  }
+
+  static func rotateTokens(
+    config: ConnectionConfig,
+    rotateOwnerToken: Bool,
+    rotateBootstrapToken: Bool,
+    ownerGraceSeconds: Int?
+  ) async throws -> APIResponse<TokenRotationResponse> {
+    let payload = TokenRotationRequest(
+      rotate_owner_token: rotateOwnerToken,
+      rotate_bootstrap_token: rotateBootstrapToken,
+      owner_grace_seconds: ownerGraceSeconds
+    )
+    return try await execute(
+      config: config,
+      path: "/api/auth/tokens/rotate",
+      method: "POST",
+      body: payload,
+      responseType: TokenRotationResponse.self
+    )
+  }
+
   static func sendCommand(config: ConnectionConfig, text: String) async throws -> APIResponse<CommandResponse> {
     let requestID = requestID(prefix: "ios")
     let payload = CommandRequest(
@@ -313,7 +371,10 @@ enum CordycepsClient {
     packageURL: String,
     queueIfOffline: Bool,
     sha256: String?,
-    sizeBytes: Int?
+    sizeBytes: Int?,
+    signature: String?,
+    signatureKeyID: String?,
+    usePrivilegedHelper: Bool
   ) async throws -> APIResponse<UpdateResponse> {
     let requestID = requestID(prefix: "ios-update")
     let payload = UpdateRequest(
@@ -324,7 +385,10 @@ enum CordycepsClient {
       package_url: packageURL,
       queue_if_offline: queueIfOffline,
       sha256: sha256,
-      size_bytes: sizeBytes
+      size_bytes: sizeBytes,
+      signature: signature,
+      signature_key_id: signatureKeyID,
+      use_privileged_helper: usePrivilegedHelper ? true : nil
     )
 
     return try await execute(

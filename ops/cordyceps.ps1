@@ -18,6 +18,14 @@ param(
 
   [string]$Version = "",
 
+  [string]$CodeSigningThumbprint = "",
+
+  [string]$CodeSigningPfxPath = "",
+
+  [string]$CodeSigningPfxPassword = "",
+
+  [string]$TimestampUrl = "",
+
   [switch]$Background,
 
   [switch]$Startup,
@@ -176,12 +184,14 @@ function Show-Help {
   Write-Host "Examples:"
   Write-Host "  .\\ops\\cordyceps.ps1 -Action start-server"
   Write-Host "  .\\ops\\cordyceps.ps1 -Action build-usb -Strain t -ServerUrl https://example.com -BootstrapToken TOKEN -Background -Startup"
+  Write-Host "  .\\ops\\cordyceps.ps1 -Action build-usb -Strain t -ServerUrl https://example.com -BootstrapToken TOKEN -CodeSigningThumbprint ABCDEF123456 -TimestampUrl http://timestamp.digicert.com"
   Write-Host "  .\\ops\\cordyceps.ps1 -Action install -Strain t -ServerUrl https://example.com -BootstrapToken TOKEN"
   Write-Host "  .\\ops\\cordyceps.ps1 -Action status -Strain t"
   Write-Host "  .\\ops\\cordyceps.ps1 -Action uninstall -Strain t"
   Write-Host ""
   Write-Host "Tip: -BootstrapToken is optional if server/data/secrets.json exists."
   Write-Host "Tip: install auto-detects agent binaries from each strain folder if -AgentExePath is omitted."
+  Write-Host "Tip: build-usb can embed Windows metadata by default and optionally Authenticode-sign with -CodeSigningThumbprint or -CodeSigningPfxPath."
 }
 
 if ($Action -eq "help") {
@@ -236,6 +246,22 @@ switch ($Action) {
 
     if (-not [string]::IsNullOrWhiteSpace($Version)) {
       $buildArgs += @("-Version", $Version)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($CodeSigningThumbprint)) {
+      $buildArgs += @("-CodeSigningThumbprint", $CodeSigningThumbprint)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($CodeSigningPfxPath)) {
+      $buildArgs += @("-CodeSigningPfxPath", $CodeSigningPfxPath)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($CodeSigningPfxPassword)) {
+      $buildArgs += @("-CodeSigningPfxPassword", $CodeSigningPfxPassword)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($TimestampUrl)) {
+      $buildArgs += @("-TimestampUrl", $TimestampUrl)
     }
 
     if ($Background.IsPresent) {

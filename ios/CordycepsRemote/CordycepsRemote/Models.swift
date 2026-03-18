@@ -1,5 +1,71 @@
 import Foundation
 
+enum JSONValue: Decodable, Hashable {
+  case string(String)
+  case number(Double)
+  case bool(Bool)
+  case object([String: JSONValue])
+  case array([JSONValue])
+  case null
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() {
+      self = .null
+      return
+    }
+    if let value = try? container.decode(Bool.self) {
+      self = .bool(value)
+      return
+    }
+    if let value = try? container.decode(Double.self) {
+      self = .number(value)
+      return
+    }
+    if let value = try? container.decode(String.self) {
+      self = .string(value)
+      return
+    }
+    if let value = try? container.decode([String: JSONValue].self) {
+      self = .object(value)
+      return
+    }
+    if let value = try? container.decode([JSONValue].self) {
+      self = .array(value)
+      return
+    }
+
+    throw DecodingError.dataCorruptedError(
+      in: container,
+      debugDescription: "Unsupported JSON value."
+    )
+  }
+
+  var compactText: String {
+    switch self {
+    case let .string(value):
+      return value
+    case let .number(value):
+      if value.rounded() == value {
+        return String(Int(value))
+      }
+      return String(value)
+    case let .bool(value):
+      return value ? "true" : "false"
+    case let .array(values):
+      return values.map(\.compactText).joined(separator: ", ")
+    case let .object(map):
+      let keys = map.keys.sorted()
+      if keys.isEmpty {
+        return "{}"
+      }
+      return keys.map { "\($0)=\(map[$0]?.compactText ?? "null")" }.joined(separator: ", ")
+    case .null:
+      return "null"
+    }
+  }
+}
+
 struct DeviceRecord: Decodable, Identifiable, Hashable {
   private static let preciseFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
@@ -21,6 +87,13 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
   let hostname: String?
   let username: String?
   let capabilities: [String]?
+  let profile: String?
+  let device_info: [String: JSONValue]?
+  let created_at: String?
+  let updated_at: String?
+  let quarantine_enabled: Bool?
+  let kill_switch_enabled: Bool?
+  let quarantine_reason: String?
 
   var id: String { device_id }
 
@@ -133,6 +206,46 @@ struct DeviceResponse: Decodable {
   let error_code: String?
 }
 
+struct DeviceRealtimeRecord: Decodable, Hashable {
+  let connected: Bool
+  let connected_at: String?
+  let last_seen_at: String?
+  let device_info: [String: JSONValue]?
+}
+
+struct QueuedUpdateRecord: Decodable, Identifiable, Hashable {
+  let id: String?
+  let request_id: String?
+  let device_id: String?
+  let version: String
+  let package_url: String
+  let sha256: String?
+  let created_at: String
+
+  var stableID: String {
+    if let id, !id.isEmpty {
+      return id
+    }
+    return "\(request_id ?? "req"):\(device_id ?? "dev"):\(version):\(created_at)"
+  }
+}
+
+struct DeviceInspectorResponse: Decodable {
+  let ok: Bool
+  let device: DeviceRecord
+  let realtime: DeviceRealtimeRecord
+  let aliases: [DeviceAppAliasRecord]
+  let queued_updates: [QueuedUpdateRecord]
+  let recent_logs: [CommandLogEntry]
+}
+
+struct DeviceDeleteResponse: Decodable {
+  let ok: Bool
+  let device_id: String?
+  let message: String?
+  let error_code: String?
+}
+
 struct DeviceControlRecord: Decodable, Hashable {
   let device_id: String
   let quarantine_enabled: Bool
@@ -203,6 +316,27 @@ struct APIKeyCreateResponse: Decodable {
   let error_code: String?
 }
 
+struct APIKeyRotateResponse: Decodable {
+  let ok: Bool
+  let rotated_from: String?
+  let key: APIKeyRecord?
+  let api_key: String?
+  let message: String?
+  let error_code: String?
+}
+
+struct TokenRotationResponse: Decodable {
+  let ok: Bool
+  let rotated_owner_token: Bool?
+  let rotated_bootstrap_token: Bool?
+  let owner_token: String?
+  let bootstrap_token: String?
+  let owner_grace_seconds: Int?
+  let previous_owner_token_valid_until: String?
+  let message: String?
+  let error_code: String?
+}
+
 struct DispatchResult: Decodable, Hashable {
   let device_id: String
   let ok: Bool
@@ -233,6 +367,11 @@ struct UpdateResponse: Decodable {
   let sha256: String?
   let hash_source: String?
   let package_size_bytes: Int?
+  let signature: String?
+  let signature_key_id: String?
+  let signature_verified: Bool?
+  let use_privileged_helper: Bool?
+  let queued: Bool?
   let result: DispatchResult?
   let results: [DispatchResult]?
 }
@@ -273,6 +412,15 @@ struct UpdateRequest: Encodable {
   let queue_if_offline: Bool?
   let sha256: String?
   let size_bytes: Int?
+  let signature: String?
+  let signature_key_id: String?
+  let use_privileged_helper: Bool?
+}
+
+struct TokenRotationRequest: Encodable {
+  let rotate_owner_token: Bool
+  let rotate_bootstrap_token: Bool
+  let owner_grace_seconds: Int?
 }
 
 struct DeviceDisplayNameUpsertRequest: Encodable {

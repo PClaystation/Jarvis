@@ -16,12 +16,16 @@ final class RemoteViewModel: ObservableObject {
     static let updateURL = "cordyceps.ios.updateURL"
     static let updateSha = "cordyceps.ios.updateSha"
     static let updateSize = "cordyceps.ios.updateSize"
+    static let updateSignatureKeyID = "cordyceps.ios.updateSignatureKeyID"
+    static let updateSignature = "cordyceps.ios.updateSignature"
+    static let updateUsePrivilegedHelper = "cordyceps.ios.updateUsePrivilegedHelper"
     static let updateQueueOffline = "cordyceps.ios.updateQueueOffline"
     static let securityDevice = "cordyceps.ios.securityDevice"
     static let securityReason = "cordyceps.ios.securityReason"
     static let securityLockdownMinutes = "cordyceps.ios.securityLockdownMinutes"
     static let adminTarget = "cordyceps.ios.adminTarget"
     static let adminShell = "cordyceps.ios.adminShell"
+    static let ownerGraceSeconds = "cordyceps.ios.ownerGraceSeconds"
     static let lastSuccess = "cordyceps.ios.lastSuccess"
     static let lastAction = "cordyceps.ios.lastAction"
     static let commandHistory = "cordyceps.ios.commandHistory"
@@ -29,6 +33,7 @@ final class RemoteViewModel: ObservableObject {
 
   private static let pollIntervalNs: UInt64 = 300_000_000_000
   private static let eventReconnectDelayNs: UInt64 = 4_000_000_000
+  private static let deviceStatusMinRefreshInterval: TimeInterval = 1.5
   private static let maxCommandHistory = 12
 
   @Published var apiBaseInput: String
@@ -55,10 +60,14 @@ final class RemoteViewModel: ObservableObject {
   @Published var updateURLInput: String
   @Published var updateShaInput: String
   @Published var updateSizeInput: String
+  @Published var updateSignatureKeyIDInput: String
+  @Published var updateSignatureInput: String
+  @Published var updateUsePrivilegedHelperInput: Bool
   @Published var updateQueueOfflineInput: Bool
   @Published var securityDeviceInput: String
   @Published var securityReasonInput: String
   @Published var securityLockdownMinutesInput: String
+  @Published var ownerGraceSecondsInput: String
 
   @Published var pairingLinkInput = ""
   @Published var deviceSearchInput = ""
@@ -78,17 +87,28 @@ final class RemoteViewModel: ObservableObject {
   @Published var apiKeyNameInput = ""
   @Published var apiKeyScopesInput = "devices:read,commands:execute,history:read,events:read"
   @Published var recentCommands: [String]
+  @Published var inspectedDeviceID = ""
+  @Published var inspectedDevice: DeviceRecord?
+  @Published var inspectedRealtime: DeviceRealtimeRecord?
+  @Published var inspectedAliases: [DeviceAppAliasRecord] = []
+  @Published var inspectedQueuedUpdates: [QueuedUpdateRecord] = []
+  @Published var inspectedRecentLogs: [CommandLogEntry] = []
+  @Published var rotatedTokenPayload = ""
 
   @Published var isLoadingDevices = false
   @Published var isLoadingGroups = false
   @Published var isLoadingHistory = false
   @Published var isLoadingAPIKeys = false
+  @Published var isLoadingDeviceInspector = false
   @Published var isSavingGroup = false
   @Published var isDeletingGroup = false
+  @Published var deletingDeviceID = ""
   @Published var isSavingDisplayName = false
   @Published var isSavingAlias = false
   @Published var isSendingAdminCommand = false
   @Published var isCreatingAPIKey = false
+  @Published var rotatingAPIKeyID = ""
+  @Published var isRotatingTokens = false
   @Published var isTestingToken = false
   @Published var isSendingCommand = false
   @Published var isPushingUpdate = false
@@ -116,6 +136,7 @@ final class RemoteViewModel: ObservableObject {
   private var eventsTask: Task<Void, Never>?
   private var hasInitialized = false
   private var appIsActive = true
+  private var lastDeviceStatusRefreshAt: Date = .distantPast
 
   init() {
     let initialTarget = defaults.string(forKey: DefaultsKey.target) ?? "m1"
@@ -127,10 +148,16 @@ final class RemoteViewModel: ObservableObject {
     let rememberedAction = defaults.string(forKey: DefaultsKey.lastAction) ?? "ping"
     let initialToken = defaults.string(forKey: DefaultsKey.token) ?? ""
     let initialQueueOffline: Bool
+    let initialUsePrivilegedHelper: Bool
     if defaults.object(forKey: DefaultsKey.updateQueueOffline) == nil {
       initialQueueOffline = true
     } else {
       initialQueueOffline = defaults.bool(forKey: DefaultsKey.updateQueueOffline)
+    }
+    if defaults.object(forKey: DefaultsKey.updateUsePrivilegedHelper) == nil {
+      initialUsePrivilegedHelper = false
+    } else {
+      initialUsePrivilegedHelper = defaults.bool(forKey: DefaultsKey.updateUsePrivilegedHelper)
     }
 
     apiBaseInput = defaults.string(forKey: DefaultsKey.apiBase) ?? ""
@@ -155,10 +182,14 @@ final class RemoteViewModel: ObservableObject {
     updateURLInput = defaults.string(forKey: DefaultsKey.updateURL) ?? ""
     updateShaInput = defaults.string(forKey: DefaultsKey.updateSha) ?? ""
     updateSizeInput = defaults.string(forKey: DefaultsKey.updateSize) ?? ""
+    updateSignatureKeyIDInput = defaults.string(forKey: DefaultsKey.updateSignatureKeyID) ?? ""
+    updateSignatureInput = defaults.string(forKey: DefaultsKey.updateSignature) ?? ""
+    updateUsePrivilegedHelperInput = initialUsePrivilegedHelper
     updateQueueOfflineInput = initialQueueOffline
     securityDeviceInput = defaults.string(forKey: DefaultsKey.securityDevice) ?? initialSecurityDevice
     securityReasonInput = defaults.string(forKey: DefaultsKey.securityReason) ?? ""
     securityLockdownMinutesInput = defaults.string(forKey: DefaultsKey.securityLockdownMinutes) ?? "30"
+    ownerGraceSecondsInput = defaults.string(forKey: DefaultsKey.ownerGraceSeconds) ?? "600"
     recentCommands = []
 
     connectionState = initialToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .disconnected : .retrying
@@ -259,6 +290,33 @@ final class RemoteViewModel: ObservableObject {
     selectedAction.placeholderArgument
   }
 
+  var hasInspectorData: Bool {
+    inspectedDevice != nil
+  }
+
+  var canDeleteInspectedDevice: Bool {
+    guard let inspectedDevice else {
+      return false
+    }
+    return !inspectedDevice.isOnline
+  }
+
+  var inspectedDeviceInfo: [String: JSONValue] {
+    if let fromDevice = inspectedDevice?.device_info, !fromDevice.isEmpty {
+      return fromDevice
+    }
+    if let fromRealtime = inspectedRealtime?.device_info, !fromRealtime.isEmpty {
+      return fromRealtime
+    }
+    return [:]
+  }
+
+  var inspectedDeviceInfoSummary: [(String, String)] {
+    inspectedDeviceInfo.keys.sorted().prefix(24).map { key in
+      (key, inspectedDeviceInfo[key]?.compactText ?? "null")
+    }
+  }
+
   var deviceSummaryText: String {
     guard !devices.isEmpty else {
       return "No data yet"
@@ -277,16 +335,20 @@ final class RemoteViewModel: ObservableObject {
     }
 
     hasInitialized = true
-    startPollingIfNeeded()
-    startRealtimeEventsIfNeeded()
 
     guard !tokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+      connectionState = .disconnected
       return
     }
 
     await loadDevices(silent: true, fromPolling: false)
     await loadGroups(silent: true)
     await loadCommandLogs(silent: true, append: false)
+    await loadAPIKeys(silent: true)
+    if connectionState == .connected {
+      startPollingIfNeeded()
+      startRealtimeEventsIfNeeded()
+    }
     if responseText == "No request yet." {
       setResult(message: "Devices loaded.", rawBody: "Devices loaded.", isError: false)
     }
@@ -345,19 +407,37 @@ final class RemoteViewModel: ObservableObject {
     let url = updateURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
     let sha = updateShaInput.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let size = updateSizeInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    let signatureKeyID = updateSignatureKeyIDInput.normalizedActionText
+    let signature = updateSignatureInput
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
 
     updateTargetInput = target
     updateVersionInput = version
     updateURLInput = url
     updateShaInput = sha
     updateSizeInput = size
+    updateSignatureKeyIDInput = signatureKeyID
+    updateSignatureInput = signature
 
     defaults.set(target, forKey: DefaultsKey.updateTarget)
     defaults.set(version, forKey: DefaultsKey.updateVersion)
     defaults.set(url, forKey: DefaultsKey.updateURL)
     defaults.set(sha, forKey: DefaultsKey.updateSha)
     defaults.set(size, forKey: DefaultsKey.updateSize)
+    defaults.set(signatureKeyID, forKey: DefaultsKey.updateSignatureKeyID)
+    defaults.set(signature, forKey: DefaultsKey.updateSignature)
+    defaults.set(updateUsePrivilegedHelperInput, forKey: DefaultsKey.updateUsePrivilegedHelper)
     defaults.set(updateQueueOfflineInput, forKey: DefaultsKey.updateQueueOffline)
+  }
+
+  func persistOwnerGraceSeconds() {
+    let trimmed = ownerGraceSecondsInput.trimmed
+    guard let parsed = parseOwnerGraceSeconds(trimmed) else {
+      return
+    }
+    ownerGraceSecondsInput = String(parsed)
+    defaults.set(ownerGraceSecondsInput, forKey: DefaultsKey.ownerGraceSeconds)
   }
 
   func persistSecuritySettings() {
@@ -447,6 +527,183 @@ final class RemoteViewModel: ObservableObject {
     commandText = composeCommand()
     setStatus("Target set to \(normalized).", isError: false)
     setResult(message: "Target set to \(normalized).", rawBody: "Target set to \(normalized).", isError: false)
+  }
+
+  func inspectDevice(_ deviceID: String, silent: Bool = false) async {
+    guard !isLoadingDeviceInspector else {
+      return
+    }
+
+    let normalized = normalizeDeviceID(deviceID)
+    guard !normalized.isEmpty else {
+      if !silent {
+        setStatus("Valid device ID is required for inspector.", isError: true)
+        setResult(message: "Valid device ID is required for inspector.", rawBody: "Valid device ID is required for inspector.", isError: true)
+      }
+      return
+    }
+
+    isLoadingDeviceInspector = true
+    defer { isLoadingDeviceInspector = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.loadDeviceInspector(
+        config: config,
+        deviceID: normalized,
+        logsLimit: 40
+      )
+
+      inspectedDeviceID = normalized
+      inspectedDevice = response.body.device
+      inspectedRealtime = response.body.realtime
+      inspectedAliases = response.body.aliases
+      inspectedQueuedUpdates = response.body.queued_updates
+      inspectedRecentLogs = response.body.recent_logs
+      connectionState = .connected
+
+      if !silent {
+        setStatus("Loaded inspector for \(normalized).", isError: false)
+        setResult(
+          message: "Loaded inspector for \(normalized).",
+          rawBody: response.rawJSON,
+          requestID: normalized,
+          latencyMs: response.latencyMs,
+          isError: false
+        )
+      }
+    } catch {
+      if !silent {
+        handle(error: error, silent: false, fromPolling: false)
+      }
+    }
+  }
+
+  func refreshInspectedDevice() async {
+    guard !inspectedDeviceID.isEmpty else {
+      return
+    }
+
+    await inspectDevice(inspectedDeviceID, silent: false)
+  }
+
+  func closeInspector() {
+    clearInspector()
+  }
+
+  func deleteDeviceRecord(_ deviceID: String) async {
+    let normalized = normalizeDeviceID(deviceID)
+    guard !normalized.isEmpty else {
+      setStatus("Valid device ID is required for delete.", isError: true)
+      setResult(message: "Valid device ID is required for delete.", rawBody: "Valid device ID is required for delete.", isError: true)
+      return
+    }
+
+    guard deletingDeviceID.isEmpty else {
+      return
+    }
+
+    deletingDeviceID = normalized
+    defer {
+      if deletingDeviceID == normalized {
+        deletingDeviceID = ""
+      }
+    }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.deleteDeviceRecord(config: config, deviceID: normalized)
+      connectionState = .connected
+
+      if inspectedDeviceID == normalized {
+        clearInspector()
+      }
+
+      await loadDevices(silent: true, fromPolling: false)
+      await loadGroups(silent: true)
+      await loadCommandLogs(silent: true, append: false)
+
+      let target = normalizeExplicitTarget(targetInput)
+      if target == normalized {
+        if let fallback = devices.first(where: { $0.device_id.normalizedActionText != normalized }) {
+          targetInput = fallback.device_id.normalizedActionText
+        } else {
+          targetInput = "m1"
+        }
+        defaults.set(targetInput, forKey: DefaultsKey.target)
+        syncSingleDeviceControls(with: targetInput)
+        commandText = composeCommand()
+      }
+
+      let message = response.body.message ?? "Deleted device record \(normalized)."
+      setStatus(message, isError: false)
+      setResult(
+        message: message,
+        rawBody: response.rawJSON,
+        requestID: normalized,
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+      triggerFeedback(.success)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
+  func isDeletingDevice(_ deviceID: String) -> Bool {
+    deletingDeviceID == deviceID.normalizedActionText
+  }
+
+  func isRotatingAPIKey(_ keyID: String) -> Bool {
+    rotatingAPIKeyID == keyID.trimmed
+  }
+
+  func rotateAPIKey(_ keyID: String) async {
+    guard rotatingAPIKeyID.isEmpty else {
+      return
+    }
+
+    let normalized = keyID.trimmed
+    guard !normalized.isEmpty else {
+      return
+    }
+
+    rotatingAPIKeyID = normalized
+    defer {
+      if rotatingAPIKeyID == normalized {
+        rotatingAPIKeyID = ""
+      }
+    }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.rotateAPIKey(config: config, keyID: normalized)
+      generatedAPIKey = response.body.api_key ?? ""
+      await loadAPIKeys(silent: true)
+      setStatus("API key rotated.", isError: false)
+      setResult(
+        message: "API key rotated.",
+        rawBody: response.rawJSON,
+        requestID: normalized,
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+      triggerFeedback(.success)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
+  func rotateOwnerToken() async {
+    await rotateTokens(rotateOwner: true, rotateBootstrap: false)
+  }
+
+  func rotateOwnerAndBootstrapTokens() async {
+    await rotateTokens(rotateOwner: true, rotateBootstrap: true)
+  }
+
+  func rotateBootstrapToken() async {
+    await rotateTokens(rotateOwner: false, rotateBootstrap: true)
   }
 
   func saveDeviceDisplayName() async {
@@ -600,6 +857,17 @@ final class RemoteViewModel: ObservableObject {
       devices = sortedDevices(response.body.devices)
       connectionState = .connected
 
+      if !inspectedDeviceID.isEmpty {
+        let inspectedStillExists = devices.contains { device in
+          device.device_id.normalizedActionText == inspectedDeviceID.normalizedActionText
+        }
+        if !inspectedStillExists {
+          clearInspector()
+        } else if !isLoadingDeviceInspector {
+          await inspectDevice(inspectedDeviceID, silent: true)
+        }
+      }
+
       if !silent {
         setStatus("Loaded \(devices.count) devices.", isError: false)
         setResult(
@@ -707,6 +975,7 @@ final class RemoteViewModel: ObservableObject {
       let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
       let response = try await CordycepsClient.listAPIKeys(config: config)
       apiKeys = response.body.keys
+      connectionState = .connected
 
       if !silent {
         setStatus("Loaded \(apiKeys.count) API keys.", isError: false)
@@ -898,6 +1167,8 @@ final class RemoteViewModel: ObservableObject {
       devices = sortedDevices(response.body.devices)
       let groupsResponse = try await CordycepsClient.loadGroups(config: config)
       groups = groupsResponse.body.groups
+      let keysResponse = try await CordycepsClient.listAPIKeys(config: config)
+      apiKeys = keysResponse.body.keys
       connectionState = .connected
       setStatus("Token valid. Device list loaded.", isError: false)
       setResult(
@@ -1056,6 +1327,9 @@ final class RemoteViewModel: ObservableObject {
     let version = updateVersionInput
     let packageURL = updateURLInput
     let sha = updateShaInput.isEmpty ? nil : updateShaInput
+    let signature = updateSignatureInput.isEmpty ? nil : updateSignatureInput
+    let signatureKeyID = updateSignatureKeyIDInput.isEmpty ? nil : updateSignatureKeyIDInput
+    let usePrivilegedHelper = updateUsePrivilegedHelperInput
     let queueIfOffline = updateQueueOfflineInput && target != "all"
 
     guard !target.isEmpty else {
@@ -1092,6 +1366,28 @@ final class RemoteViewModel: ObservableObject {
       return
     }
 
+    if let signature, signature.count > 1024 {
+      setStatus("Signature must be at most 1024 characters.", isError: true)
+      setResult(message: "Signature must be at most 1024 characters.", rawBody: "Signature must be at most 1024 characters.", isError: true)
+      return
+    }
+
+    if let signatureKeyID, !isValidSignatureKeyID(signatureKeyID) {
+      setStatus("Signature key ID must match [a-z0-9._-] and be at most 40 chars.", isError: true)
+      setResult(
+        message: "Signature key ID must match [a-z0-9._-] and be at most 40 chars.",
+        rawBody: "Signature key ID must match [a-z0-9._-] and be at most 40 chars.",
+        isError: true
+      )
+      return
+    }
+
+    if signatureKeyID != nil, signature == nil {
+      setStatus("Signature key ID requires a signature value.", isError: true)
+      setResult(message: "Signature key ID requires a signature value.", rawBody: "Signature key ID requires a signature value.", isError: true)
+      return
+    }
+
     let sizeBytes: Int?
     if updateSizeInput.isEmpty {
       sizeBytes = nil
@@ -1115,7 +1411,10 @@ final class RemoteViewModel: ObservableObject {
         packageURL: packageURL,
         queueIfOffline: queueIfOffline,
         sha256: sha,
-        sizeBytes: sizeBytes
+        sizeBytes: sizeBytes,
+        signature: signature,
+        signatureKeyID: signatureKeyID,
+        usePrivilegedHelper: usePrivilegedHelper
       )
 
       connectionState = .connected
@@ -1304,6 +1603,9 @@ final class RemoteViewModel: ObservableObject {
     let updateURL = read("update_url")
     let updateSha = read("update_sha")
     let updateSize = read("update_size")
+    let updateSignatureKeyID = read("update_signature_key_id")
+    let updateSignature = read("update_signature")
+    let updateUsePrivilegedHelper = read("update_use_privileged_helper")
     let updateQueueOffline = read("update_queue_offline")
 
     var applied = false
@@ -1367,6 +1669,29 @@ final class RemoteViewModel: ObservableObject {
     if !updateSize.isEmpty {
       updateSizeInput = updateSize
       defaults.set(updateSize, forKey: DefaultsKey.updateSize)
+      applied = true
+    }
+
+    if !updateSignatureKeyID.isEmpty {
+      let normalizedKeyID = updateSignatureKeyID.normalizedActionText
+      updateSignatureKeyIDInput = normalizedKeyID
+      defaults.set(normalizedKeyID, forKey: DefaultsKey.updateSignatureKeyID)
+      applied = true
+    }
+
+    if !updateSignature.isEmpty {
+      let sanitizedSignature = updateSignature
+        .trimmed
+        .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+      updateSignatureInput = sanitizedSignature
+      defaults.set(sanitizedSignature, forKey: DefaultsKey.updateSignature)
+      applied = true
+    }
+
+    if !updateUsePrivilegedHelper.isEmpty {
+      let normalized = updateUsePrivilegedHelper.trimmed.lowercased()
+      updateUsePrivilegedHelperInput = normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on"
+      defaults.set(updateUsePrivilegedHelperInput, forKey: DefaultsKey.updateUsePrivilegedHelper)
       applied = true
     }
 
@@ -1516,6 +1841,75 @@ final class RemoteViewModel: ObservableObject {
     }
   }
 
+  private func rotateTokens(rotateOwner: Bool, rotateBootstrap: Bool) async {
+    guard !isRotatingTokens else {
+      return
+    }
+
+    let ownerGraceSeconds: Int?
+    if rotateOwner {
+      let raw = ownerGraceSecondsInput.trimmed
+      let candidate = raw.isEmpty ? 600 : parseOwnerGraceSeconds(raw)
+      guard let parsed = candidate else {
+        setStatus("Owner grace seconds must be an integer between 0 and 3600.", isError: true)
+        setResult(
+          message: "Owner grace seconds must be an integer between 0 and 3600.",
+          rawBody: "Owner grace seconds must be an integer between 0 and 3600.",
+          isError: true
+        )
+        return
+      }
+      ownerGraceSecondsInput = String(parsed)
+      defaults.set(ownerGraceSecondsInput, forKey: DefaultsKey.ownerGraceSeconds)
+      ownerGraceSeconds = parsed
+    } else {
+      ownerGraceSeconds = nil
+    }
+
+    isRotatingTokens = true
+    defer { isRotatingTokens = false }
+
+    do {
+      let config = try CordycepsClient.makeConnectionConfig(apiBaseInput: apiBaseInput, tokenInput: tokenInput)
+      let response = try await CordycepsClient.rotateTokens(
+        config: config,
+        rotateOwnerToken: rotateOwner,
+        rotateBootstrapToken: rotateBootstrap,
+        ownerGraceSeconds: ownerGraceSeconds
+      )
+
+      connectionState = .connected
+      rotatedTokenPayload = response.rawJSON
+
+      if rotateOwner, let newOwnerToken = response.body.owner_token, !newOwnerToken.isEmpty {
+        tokenInput = newOwnerToken
+        defaults.set(newOwnerToken, forKey: DefaultsKey.token)
+      }
+
+      startPollingIfNeeded()
+      startRealtimeEventsIfNeeded()
+
+      let message: String
+      if let expiresAt = response.body.previous_owner_token_valid_until, !expiresAt.isEmpty {
+        message = "Owner token rotated. Previous token valid until \(toLocalTimestamp(expiresAt))."
+      } else {
+        message = "Token rotation completed."
+      }
+
+      setStatus(message, isError: false)
+      setResult(
+        message: message,
+        rawBody: response.rawJSON,
+        requestID: "-",
+        latencyMs: response.latencyMs,
+        isError: false
+      )
+      triggerFeedback(.success)
+    } catch {
+      handle(error: error, silent: false, fromPolling: false)
+    }
+  }
+
   private func startRealtimeEventsIfNeeded() {
     eventsTask?.cancel()
     eventsTask = nil
@@ -1535,6 +1929,15 @@ final class RemoteViewModel: ObservableObject {
     eventsTask = Task { [weak self] in
       await self?.runEventLoop()
     }
+  }
+
+  private func clearInspector() {
+    inspectedDeviceID = ""
+    inspectedDevice = nil
+    inspectedRealtime = nil
+    inspectedAliases = []
+    inspectedQueuedUpdates = []
+    inspectedRecentLogs = []
   }
 
   private func runEventLoop() async {
@@ -1588,6 +1991,11 @@ final class RemoteViewModel: ObservableObject {
     case "ready", "ping":
       connectionState = .connected
     case "device_status":
+      let now = Date()
+      if now.timeIntervalSince(lastDeviceStatusRefreshAt) < Self.deviceStatusMinRefreshInterval {
+        return
+      }
+      lastDeviceStatusRefreshAt = now
       await loadDevices(silent: true, fromPolling: true)
       await loadGroups(silent: true)
     case "command_log":
@@ -1599,7 +2007,11 @@ final class RemoteViewModel: ObservableObject {
         return
       }
 
-      upsertCommandLog(event.asCommandLogEntry())
+      let entry = event.asCommandLogEntry()
+      upsertCommandLog(entry)
+      if inspectedDeviceID == entry.device_id.normalizedActionText {
+        upsertInspectedRecentLog(entry)
+      }
     default:
       break
     }
@@ -1799,6 +2211,18 @@ final class RemoteViewModel: ObservableObject {
     }
   }
 
+  private func upsertInspectedRecentLog(_ entry: CommandLogEntry) {
+    if let existing = inspectedRecentLogs.firstIndex(where: { $0.id == entry.id }) {
+      inspectedRecentLogs[existing] = entry
+      return
+    }
+
+    inspectedRecentLogs.insert(entry, at: 0)
+    if inspectedRecentLogs.count > 120 {
+      inspectedRecentLogs = Array(inspectedRecentLogs.prefix(120))
+    }
+  }
+
   private func normalizeTarget(_ input: String) -> String {
     let normalized = normalizeExplicitTarget(input)
     if normalized.isEmpty {
@@ -1873,6 +2297,10 @@ final class RemoteViewModel: ObservableObject {
     value.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil
   }
 
+  private func isValidSignatureKeyID(_ value: String) -> Bool {
+    value.range(of: #"^[a-z0-9._-]{1,40}$"#, options: .regularExpression) != nil
+  }
+
   private func parseLockdownMinutes(_ value: String) -> Int? {
     let trimmed = value.trimmed
     if trimmed.isEmpty {
@@ -1883,6 +2311,14 @@ final class RemoteViewModel: ObservableObject {
       return nil
     }
 
+    return parsed
+  }
+
+  private func parseOwnerGraceSeconds(_ value: String) -> Int? {
+    let trimmed = value.trimmed
+    guard let parsed = Int(trimmed), (0 ... 3600).contains(parsed) else {
+      return nil
+    }
     return parsed
   }
 

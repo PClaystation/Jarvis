@@ -6,6 +6,8 @@ struct ContentView: View {
 
   @State private var showDangerousSendConfirmation = false
   @State private var showUpdateConfirmation = false
+  @State private var showDeleteDeviceConfirmation = false
+  @State private var pendingDeleteDeviceID = ""
 
   var body: some View {
     NavigationStack {
@@ -13,10 +15,11 @@ struct ContentView: View {
         backgroundLayer
 
         ScrollView {
-          VStack(spacing: 18) {
+          LazyVStack(spacing: 18) {
             heroCard
             connectionCard
             devicesCard
+            inspectorCard
             groupsCard
             commandCard
             securityCard
@@ -24,16 +27,12 @@ struct ContentView: View {
             updateCard
             historyCard
             apiKeysCard
+            tokenRotationCard
             resultCard
           }
           .padding(.horizontal, 16)
           .padding(.top, 10)
           .padding(.bottom, 28)
-        }
-        .refreshable {
-          await viewModel.loadDevices()
-          await viewModel.loadGroups(silent: true)
-          await viewModel.loadCommandLogs(silent: true, append: false)
         }
       }
       .navigationTitle("Cordyceps Bloom")
@@ -89,6 +88,22 @@ struct ContentView: View {
         Button("Cancel", role: .cancel) {}
       } message: {
         Text("Updates may restart agents and break connectivity if details are wrong.")
+      }
+      .confirmationDialog(
+        "Delete saved device record \(pendingDeleteDeviceID)?",
+        isPresented: $showDeleteDeviceConfirmation,
+        titleVisibility: .visible
+      ) {
+        Button("Delete Record", role: .destructive) {
+          let deviceID = pendingDeleteDeviceID
+          pendingDeleteDeviceID = ""
+          Task { await viewModel.deleteDeviceRecord(deviceID) }
+        }
+        Button("Cancel", role: .cancel) {
+          pendingDeleteDeviceID = ""
+        }
+      } message: {
+        Text("This removes aliases, queued updates, and history tied to this designation.")
       }
     }
   }
@@ -347,11 +362,166 @@ struct ContentView: View {
         } else {
           ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 10) {
-              ForEach(viewModel.filteredDevices) { device in
+              ForEach(viewModel.filteredDevices, id: \.id) { device in
                 deviceCard(device)
               }
             }
             .padding(.vertical, 2)
+          }
+        }
+      }
+    }
+  }
+
+  private var inspectorCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("Device Inspector")
+
+        if !viewModel.hasInspectorData {
+          emptyState("Tap Inspect on a device card to load full record details.")
+        } else if let device = viewModel.inspectedDevice {
+          HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+              Text(device.displayTitle)
+                .font(.system(.headline, design: .rounded).weight(.bold))
+                .foregroundStyle(.white)
+
+              Text(device.device_id)
+                .font(.system(.caption, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.68))
+
+              if let profile = device.profile, !profile.isEmpty {
+                Text("profile \(profile)")
+                  .font(.system(.caption2, design: .rounded).weight(.semibold))
+                  .foregroundStyle(CordycepsTheme.capsuleAmber.opacity(0.92))
+              }
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+              Capsule()
+                .fill(device.isOnline ? CordycepsTheme.myceliumGlow : CordycepsTheme.errorDot)
+                .frame(width: 8, height: 8)
+              Text(device.isOnline ? "online" : "offline")
+                .font(.system(.caption, design: .rounded).weight(.semibold))
+                .foregroundStyle(device.isOnline ? CordycepsTheme.myceliumGlow : CordycepsTheme.errorText)
+            }
+          }
+
+          HStack(spacing: 8) {
+            actionButton("Refresh", icon: "arrow.clockwise", role: .normal, loading: viewModel.isLoadingDeviceInspector) {
+              Task { await viewModel.refreshInspectedDevice() }
+            }
+            actionButton("Close", icon: "xmark.circle.fill", role: .normal) {
+              viewModel.closeInspector()
+            }
+            actionButton(
+              "Delete Record",
+              icon: "trash.fill",
+              role: .danger,
+              loading: viewModel.isDeletingDevice(device.device_id),
+              disabled: !viewModel.canDeleteInspectedDevice
+            ) {
+              pendingDeleteDeviceID = device.device_id.normalizedActionText
+              showDeleteDeviceConfirmation = true
+            }
+          }
+
+          inspectorInfoRow("Hostname", (device.hostname?.trimmed ?? "").isEmpty ? "n/a" : (device.hostname ?? "n/a"))
+          inspectorInfoRow("Username", (device.username?.trimmed ?? "").isEmpty ? "n/a" : (device.username ?? "n/a"))
+          inspectorInfoRow("Last Seen", device.lastSeenLabel)
+          inspectorInfoRow("Connected", viewModel.inspectedRealtime?.connected == true ? "true" : "false")
+          inspectorInfoRow("Connected At", toLocal(viewModel.inspectedRealtime?.connected_at ?? ""))
+          inspectorInfoRow("Realtime Last Seen", toLocal(viewModel.inspectedRealtime?.last_seen_at ?? ""))
+          inspectorInfoRow("Quarantine", (device.quarantine_enabled ?? false) ? "enabled" : "off")
+          inspectorInfoRow("Kill Switch", (device.kill_switch_enabled ?? false) ? "enabled" : "off")
+          inspectorInfoRow("Reason", (device.quarantine_reason?.trimmed ?? "").isEmpty ? "none" : (device.quarantine_reason ?? "none"))
+
+          Text("Capabilities")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          if let capabilities = device.capabilities, !capabilities.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+              HStack(spacing: 6) {
+                ForEach(Array(capabilities.prefix(20).enumerated()), id: \.offset) { _, capability in
+                  Text(capability)
+                    .font(.system(.caption2, design: .rounded).weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                      Capsule()
+                        .fill(CordycepsTheme.cardFill)
+                        .overlay(Capsule().stroke(CordycepsTheme.strokeSoft, lineWidth: 1))
+                    )
+                    .foregroundStyle(Color.white.opacity(0.86))
+                }
+              }
+              .padding(.vertical, 2)
+            }
+          } else {
+            emptyState("No capabilities reported.")
+          }
+
+          Text("App Aliases")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          if viewModel.inspectedAliases.isEmpty {
+            emptyState("No aliases configured.")
+          } else {
+            VStack(spacing: 6) {
+              ForEach(Array(viewModel.inspectedAliases.prefix(8)), id: \.id) { alias in
+                inspectorInfoRow(alias.alias, alias.app)
+              }
+            }
+          }
+
+          Text("Queued Updates")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          if viewModel.inspectedQueuedUpdates.isEmpty {
+            emptyState("No queued updates.")
+          } else {
+            VStack(spacing: 6) {
+              ForEach(Array(viewModel.inspectedQueuedUpdates.prefix(8)), id: \.stableID) { queued in
+                inspectorInfoRow(queued.version, "\(queued.package_url) • \(toLocal(queued.created_at))")
+              }
+            }
+          }
+
+          Text("Recent Commands")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          if viewModel.inspectedRecentLogs.isEmpty {
+            emptyState("No recent command logs.")
+          } else {
+            VStack(spacing: 6) {
+              ForEach(Array(viewModel.inspectedRecentLogs.prefix(10)), id: \.id) { entry in
+                inspectorInfoRow(
+                  "\(entry.parsed_type) • \(entry.status)",
+                  entry.result_message ?? entry.raw_text
+                )
+              }
+            }
+          }
+
+          Text("Device Info Snapshot")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(Color.white.opacity(0.72))
+
+          if viewModel.inspectedDeviceInfoSummary.isEmpty {
+            emptyState("No runtime device-info payload.")
+          } else {
+            VStack(spacing: 6) {
+              ForEach(Array(viewModel.inspectedDeviceInfoSummary.enumerated()), id: \.offset) { item in
+                inspectorInfoRow(item.element.0, item.element.1)
+              }
+            }
           }
         }
       }
@@ -398,18 +568,54 @@ struct ContentView: View {
 
       Spacer(minLength: 0)
 
-      Button {
-        viewModel.useDeviceAsTarget(device.device_id)
-      } label: {
-        Text("Use Device")
-          .font(.system(.caption, design: .rounded).weight(.bold))
-          .frame(maxWidth: .infinity)
+      HStack(spacing: 6) {
+        Button {
+          viewModel.useDeviceAsTarget(device.device_id)
+        } label: {
+          Text("Use")
+            .font(.system(.caption, design: .rounded).weight(.bold))
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(device.isOnline ? CordycepsTheme.primaryButton : CordycepsTheme.offlineButton)
+
+        Button {
+          Task { await viewModel.inspectDevice(device.device_id) }
+        } label: {
+          if viewModel.isLoadingDeviceInspector && viewModel.inspectedDeviceID == device.device_id.normalizedActionText {
+            ProgressView()
+              .tint(CordycepsTheme.capsuleAmber)
+              .frame(maxWidth: .infinity)
+          } else {
+            Text("Inspect")
+              .font(.system(.caption, design: .rounded).weight(.bold))
+              .frame(maxWidth: .infinity)
+          }
+        }
+        .buttonStyle(.bordered)
+        .tint(CordycepsTheme.capsuleAmber)
+
+        Button {
+          pendingDeleteDeviceID = device.device_id.normalizedActionText
+          showDeleteDeviceConfirmation = true
+        } label: {
+          if viewModel.isDeletingDevice(device.device_id) {
+            ProgressView()
+              .tint(CordycepsTheme.errorDot)
+              .frame(maxWidth: .infinity)
+          } else {
+            Text("Delete")
+              .font(.system(.caption, design: .rounded).weight(.bold))
+              .frame(maxWidth: .infinity)
+          }
+        }
+        .buttonStyle(.bordered)
+        .tint(CordycepsTheme.errorDot)
+        .disabled(device.isOnline)
       }
-      .buttonStyle(.borderedProminent)
-      .tint(device.isOnline ? CordycepsTheme.primaryButton : CordycepsTheme.offlineButton)
     }
     .padding(12)
-    .frame(width: 220, height: 182, alignment: .topLeading)
+    .frame(width: 246, height: 212, alignment: .topLeading)
     .background(
       RoundedRectangle(cornerRadius: 15, style: .continuous)
         .fill(CordycepsTheme.cardFill)
@@ -466,7 +672,7 @@ struct ContentView: View {
         } else {
           ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 10) {
-              ForEach(viewModel.groups) { group in
+              ForEach(viewModel.groups, id: \.id) { group in
                 VStack(alignment: .leading, spacing: 8) {
                   Text(group.display_name)
                     .font(.system(.headline, design: .rounded).weight(.bold))
@@ -847,6 +1053,38 @@ struct ContentView: View {
             viewModel.persistUpdateSettings()
           }
 
+        TextField("Signature Key ID (optional)", text: $viewModel.updateSignatureKeyIDInput)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.updateSignatureKeyIDInput) { _ in
+            viewModel.persistUpdateSettings()
+          }
+
+        TextField("Detached Signature (base64, optional)", text: $viewModel.updateSignatureInput, axis: .vertical)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .lineLimit(2 ... 4)
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.updateSignatureInput) { _ in
+            viewModel.persistUpdateSettings()
+          }
+
+        Toggle(isOn: $viewModel.updateUsePrivilegedHelperInput) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Use Privileged Helper Split")
+              .font(.system(.footnote, design: .rounded).weight(.semibold))
+              .foregroundStyle(.white)
+            Text("Optional. May trigger UAC prompt on supported targets.")
+              .font(.system(.caption2, design: .rounded))
+              .foregroundStyle(Color.white.opacity(0.68))
+          }
+        }
+        .tint(CordycepsTheme.capsuleAmber)
+        .onChange(of: viewModel.updateUsePrivilegedHelperInput) { _ in
+          viewModel.persistUpdateSettings()
+        }
+
         Toggle(isOn: $viewModel.updateQueueOfflineInput) {
           VStack(alignment: .leading, spacing: 2) {
             Text("Queue If Target Is Offline")
@@ -891,46 +1129,43 @@ struct ContentView: View {
         if viewModel.commandLogs.isEmpty {
           emptyState("No command history loaded.")
         } else {
-          ScrollView(.vertical, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: 8) {
-              ForEach(viewModel.commandLogs.prefix(40)) { entry in
-                VStack(alignment: .leading, spacing: 6) {
-                  HStack {
-                    Text("\(entry.device_id) • \(entry.parsed_type)")
-                      .font(.system(.caption, design: .rounded).weight(.semibold))
-                      .foregroundStyle(.white)
-                    Spacer(minLength: 0)
-                    Text(entry.status.uppercased())
-                      .font(.system(size: 10, weight: .bold, design: .rounded))
-                      .foregroundStyle(entry.status == "ok" ? CordycepsTheme.myceliumGlow : CordycepsTheme.errorText)
-                  }
-
-                  Text("\(entry.parsed_target) • \(entry.request_id)")
-                    .font(.system(.caption2, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.66))
-
-                  Text(entry.result_message ?? entry.raw_text)
-                    .font(.system(.caption2, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.8))
-                    .lineLimit(2)
-
-                  Text(toLocal(entry.created_at))
-                    .font(.system(.caption2, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.55))
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(viewModel.commandLogs.prefix(24)), id: \.id) { entry in
+              VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                  Text("\(entry.device_id) • \(entry.parsed_type)")
+                    .font(.system(.caption, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.white)
+                  Spacer(minLength: 0)
+                  Text(entry.status.uppercased())
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(entry.status == "ok" ? CordycepsTheme.myceliumGlow : CordycepsTheme.errorText)
                 }
-                .padding(10)
-                .background(
-                  RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(CordycepsTheme.cardFill)
-                    .overlay(
-                      RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
-                    )
-                )
+
+                Text("\(entry.parsed_target) • \(entry.request_id)")
+                  .font(.system(.caption2, design: .rounded))
+                  .foregroundStyle(Color.white.opacity(0.66))
+
+                Text(entry.result_message ?? entry.raw_text)
+                  .font(.system(.caption2, design: .rounded))
+                  .foregroundStyle(Color.white.opacity(0.8))
+                  .lineLimit(2)
+
+                Text(toLocal(entry.created_at))
+                  .font(.system(.caption2, design: .rounded))
+                  .foregroundStyle(Color.white.opacity(0.55))
               }
+              .padding(10)
+              .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                  .fill(CordycepsTheme.cardFill)
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                      .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+                  )
+              )
             }
           }
-          .frame(maxHeight: 280)
         }
       }
     }
@@ -972,7 +1207,6 @@ struct ContentView: View {
           Text(viewModel.generatedAPIKey)
             .font(.system(.caption2, design: .monospaced))
             .foregroundStyle(Color.white.opacity(0.9))
-            .textSelection(.enabled)
             .padding(10)
             .background(
               RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -988,7 +1222,7 @@ struct ContentView: View {
           emptyState("No API keys loaded.")
         } else {
           VStack(alignment: .leading, spacing: 8) {
-            ForEach(viewModel.apiKeys.prefix(12)) { key in
+            ForEach(Array(viewModel.apiKeys.prefix(12)), id: \.id) { key in
               VStack(alignment: .leading, spacing: 6) {
                 HStack {
                   Text(key.name)
@@ -1006,8 +1240,18 @@ struct ContentView: View {
                   .lineLimit(2)
 
                 if key.status == "active" {
-                  actionButton("Revoke", icon: "xmark.circle.fill", role: .danger) {
-                    Task { await viewModel.revokeAPIKey(key.key_id) }
+                  HStack(spacing: 8) {
+                    actionButton(
+                      "Rotate",
+                      icon: "arrow.triangle.2.circlepath.circle.fill",
+                      role: .warning,
+                      loading: viewModel.isRotatingAPIKey(key.key_id)
+                    ) {
+                      Task { await viewModel.rotateAPIKey(key.key_id) }
+                    }
+                    actionButton("Revoke", icon: "xmark.circle.fill", role: .danger) {
+                      Task { await viewModel.revokeAPIKey(key.key_id) }
+                    }
                   }
                 }
               }
@@ -1027,6 +1271,59 @@ struct ContentView: View {
     }
   }
 
+  private var tokenRotationCard: some View {
+    CordycepsCard {
+      VStack(alignment: .leading, spacing: 12) {
+        sectionHeader("Token Rotation")
+
+        Text("Owner-only rotation for owner/bootstrap tokens with optional grace window.")
+          .font(.system(.caption, design: .rounded))
+          .foregroundStyle(Color.white.opacity(0.72))
+
+        TextField("Owner grace seconds (0-3600)", text: $viewModel.ownerGraceSecondsInput)
+          .keyboardType(.numberPad)
+          .cordycepsFieldStyle()
+          .onChange(of: viewModel.ownerGraceSecondsInput) { _ in
+            viewModel.persistOwnerGraceSeconds()
+          }
+
+        HStack(spacing: 8) {
+          actionButton("Rotate Owner", icon: "key.fill", role: .warning, loading: viewModel.isRotatingTokens) {
+            Task { await viewModel.rotateOwnerToken() }
+          }
+          actionButton("Rotate Owner + Bootstrap", icon: "arrow.triangle.2.circlepath", role: .warning, loading: viewModel.isRotatingTokens) {
+            Task { await viewModel.rotateOwnerAndBootstrapTokens() }
+          }
+        }
+
+        actionButton("Rotate Bootstrap", icon: "arrow.clockwise.shield", role: .normal, loading: viewModel.isRotatingTokens) {
+          Task { await viewModel.rotateBootstrapToken() }
+        }
+
+        if !viewModel.rotatedTokenPayload.isEmpty {
+          Text("Latest Rotation Payload")
+            .font(.system(.caption, design: .rounded).weight(.semibold))
+            .foregroundStyle(CordycepsTheme.capsuleAmber.opacity(0.95))
+
+          Text(String(viewModel.rotatedTokenPayload.prefix(5000)))
+            .font(.system(.caption2, design: .monospaced))
+            .foregroundStyle(Color.white.opacity(0.9))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lineLimit(18)
+            .padding(10)
+            .background(
+              RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.black.opacity(0.24))
+                .overlay(
+                  RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+                )
+            )
+        }
+      }
+    }
+  }
+
   private var resultCard: some View {
     CordycepsCard {
       VStack(alignment: .leading, spacing: 12) {
@@ -1039,23 +1336,20 @@ struct ContentView: View {
           resultRow("Message", value: viewModel.resultMessage, multiline: true)
         }
 
-        ScrollView(.vertical) {
-          Text(viewModel.responseText)
-            .font(.system(.footnote, design: .monospaced))
-            .foregroundStyle(CordycepsTheme.resultText)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
-        }
-        .frame(minHeight: 130, maxHeight: 260)
-        .padding(12)
-        .background(
-          RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color.black.opacity(0.32))
-            .overlay(
-              RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
-            )
-        )
+        Text(String(viewModel.responseText.prefix(8000)))
+          .font(.system(.footnote, design: .monospaced))
+          .foregroundStyle(CordycepsTheme.resultText)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .lineLimit(26)
+          .padding(12)
+          .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+              .fill(Color.black.opacity(0.32))
+              .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                  .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
+              )
+          )
 
         actionButton("Copy Result JSON", icon: "doc.on.doc.fill", role: .normal) {
           viewModel.copyResponseToClipboard()
@@ -1139,6 +1433,27 @@ struct ContentView: View {
         .overlay(
           RoundedRectangle(cornerRadius: 12, style: .continuous)
             .stroke(CordycepsTheme.dangerStroke, lineWidth: 1)
+        )
+    )
+  }
+
+  private func inspectorInfoRow(_ key: String, _ value: String) -> some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(key)
+        .font(.system(.caption2, design: .rounded).weight(.semibold))
+        .foregroundStyle(Color.white.opacity(0.68))
+      Text(value.isEmpty ? "n/a" : value)
+        .font(.system(.caption, design: .rounded))
+        .foregroundStyle(Color.white.opacity(0.90))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    .padding(10)
+    .background(
+      RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(CordycepsTheme.cardFill)
+        .overlay(
+          RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .stroke(CordycepsTheme.strokeSoft, lineWidth: 1)
         )
     )
   }
